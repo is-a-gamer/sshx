@@ -48,7 +48,11 @@ impl SshxService for GrpcServer {
         if origin.is_empty() {
             return Err(Status::invalid_argument("origin is empty"));
         }
-        let name = rand_alphanumeric(10);
+        let mut name = request.name.clone();
+        if name.is_empty() {
+            name = rand_alphanumeric(10);
+        }
+        // let name = rand_alphanumeric(10);
         info!(%name, "creating new session");
 
         match self.0.lookup(&name) {

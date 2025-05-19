@@ -27,6 +27,12 @@ struct Args {
     #[clap(long)]
     name: Option<String>,
 
+    /// 设置客户端访问密码,如果都没有设置,默认为空
+    #[clap(long, default_value = "",env = "SSHX_PASSWORD")]
+    password: String,
+
+    // #[clap(long, default_value = "",env = "SSHX_PASSWORD")]
+    // password: String,
     /// Enable read-only access mode - generates separate URLs for viewers and
     /// editors.
     #[clap(long)]
@@ -79,18 +85,19 @@ async fn start(args: Args) -> Result<()> {
     };
 
     let name = args.name.unwrap_or_else(|| {
-        let mut name = whoami::username();
-        if let Ok(host) = whoami::fallible::hostname() {
-            // Trim domain information like .lan or .local
-            let host = host.split('.').next().unwrap_or(&host);
-            name += "@";
-            name += host;
-        }
-        name
+        // 如果需要改成获取主机名,那么则使用下面的
+        // let mut name = whoami::username();
+        // if let Ok(host) = whoami::fallible::hostname() {
+        //     // Trim domain information like .lan or .local
+        //     let host = host.split('.').next().unwrap_or(&host);
+        //     name += "@";
+        //     name += host;
+        // }
+        "".to_string()
     });
 
     let runner = Runner::Shell(shell.clone());
-    let mut controller = Controller::new(&args.server, &name, runner, args.enable_readers).await?;
+    let mut controller = Controller::new(&args.server, &name, &args.password, runner, args.enable_readers).await?;
     if args.quiet {
         if let Some(write_url) = controller.write_url() {
             println!("{}", write_url);
