@@ -33,6 +33,7 @@ pub struct Controller {
     encryption_key: String,
 
     name: String,
+    password: String,
     token: String,
     url: String,
     write_url: Option<String>,
@@ -50,11 +51,12 @@ impl Controller {
     pub async fn new(
         origin: &str,
         name: &str,
+        password: &str,
         runner: Runner,
         enable_readers: bool,
     ) -> Result<Self> {
         debug!(%origin, "connecting to server");
-        let encryption_key = rand_alphanumeric(14); // 83.3 bits of entropy
+        let encryption_key = "view".to_string(); // 83.3 bits of entropy
 
         let kdf_task = {
             let encryption_key = encryption_key.clone();
@@ -62,7 +64,7 @@ impl Controller {
         };
 
         let (write_password, kdf_write_password_task) = if enable_readers {
-            let write_password = rand_alphanumeric(14); // 83.3 bits of entropy
+            let write_password = password.to_string(); // 83.3 bits of entropy
             let task = {
                 let write_password = write_password.clone();
                 task::spawn_blocking(move || Encrypt::new(&write_password))
@@ -102,6 +104,7 @@ impl Controller {
             encrypt,
             encryption_key,
             name: resp.name,
+            password: password.into(),
             token: resp.token,
             url: resp.url,
             write_url,
@@ -154,6 +157,7 @@ impl Controller {
                         match Controller::new(
                             &self.origin,
                             &self.name,
+                            &self.password,
                             self.runner.clone(),
                             self.write_url.is_some(),
                         )
