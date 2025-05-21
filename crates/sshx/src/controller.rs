@@ -2,13 +2,13 @@
 
 use std::collections::HashMap;
 use std::pin::pin;
-
+use std::process::exit;
 use anyhow::{Context, Result};
 use sshx_core::proto::{
     client_update::ClientMessage, server_update::ServerMessage,
     sshx_service_client::SshxServiceClient, ClientUpdate, CloseRequest, NewShell, OpenRequest,
 };
-use sshx_core::{rand_alphanumeric, Sid};
+use sshx_core::Sid;
 use tokio::sync::mpsc;
 use tokio::task;
 use tokio::time::{self, Duration, Instant, MissedTickBehavior};
@@ -27,6 +27,7 @@ const RECONNECT_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Handles a single session's communication with the remote server.
 pub struct Controller {
+    enable_reconnect: bool,
     origin: String,
     runner: Runner,
     encrypt: Encrypt,
@@ -37,7 +38,6 @@ pub struct Controller {
     token: String,
     url: String,
     write_url: Option<String>,
-
     /// Channels with backpressure routing messages to each shell task.
     shells_tx: HashMap<Sid, mpsc::Sender<ShellData>>,
     /// Channel shared with tasks to allow them to output client messages.
@@ -53,7 +53,7 @@ impl Controller {
         name: &str,
         password: &str,
         runner: Runner,
-        enable_readers: bool,
+        enable_reconnect: bool,
     ) -> Result<Self> {
         debug!(%origin, "connecting to server");
         let encryption_key = "view".to_string(); // 83.3 bits of entropy
@@ -63,7 +63,7 @@ impl Controller {
             task::spawn_blocking(move || Encrypt::new(&encryption_key))
         };
 
-        let (write_password, kdf_write_password_task) = if enable_readers {
+        let (write_password, kdf_write_password_task) = if !password.is_empty() {
             let write_password = password.to_string(); // 83.3 bits of entropy
             let task = {
                 let write_password = write_password.clone();
@@ -99,6 +99,7 @@ impl Controller {
 
         let (output_tx, output_rx) = mpsc::channel(64);
         Ok(Self {
+            enable_reconnect,
             origin: origin.into(),
             runner,
             encrypt,
@@ -175,6 +176,10 @@ impl Controller {
                             }
                         }
                     }
+                }
+                if !self.enable_reconnect{
+                    info!("connect close,client not enable reconnect");
+                    exit(0)
                 }
                 if last_retry.elapsed() >= Duration::from_secs(10) {
                     retries = 0;

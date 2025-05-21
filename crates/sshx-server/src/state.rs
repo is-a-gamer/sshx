@@ -39,6 +39,9 @@ pub struct ServerState {
 
     /// Storage and distributed communication provider, if enabled.
     mesh: Option<StorageMesh>,
+
+    /// 管理员查看会话列表的密钥
+    pub secret: String,
 }
 
 impl ServerState {
@@ -54,6 +57,7 @@ impl ServerState {
             override_origin: options.override_origin,
             store: DashMap::new(),
             mesh,
+            secret,
         })
     }
 
@@ -176,6 +180,11 @@ impl ServerState {
                 }
             }
         }
+    }
+
+    /// Get all active session names
+    pub fn get_all_session_names(&self) -> Vec<String> {
+        self.store.iter().map(|entry| entry.key().clone()).collect()
     }
 
     /// Send a graceful shutdown signal to every session.

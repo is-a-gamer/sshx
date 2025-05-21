@@ -3,6 +3,7 @@ import themes, { type ThemeName, defaultTheme } from "./ui/themes";
 import { derived, type Readable } from "svelte/store";
 
 export type Settings = {
+  password: string;
   name: string;
   theme: ThemeName;
   scrollback: number;
@@ -17,6 +18,8 @@ export const settings: Readable<Settings> = derived(
     // Do some validation on all of the stored settings.
     const name = $storedSettings.name ?? "";
 
+    const password = $storedSettings.password ?? "";
+
     let theme = $storedSettings.theme;
     if (!theme || !Object.hasOwn(themes, theme)) {
       theme = defaultTheme;
@@ -29,6 +32,7 @@ export const settings: Readable<Settings> = derived(
 
     return {
       name,
+      password,
       theme,
       scrollback,
     };

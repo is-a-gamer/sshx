@@ -16,6 +16,12 @@ const config = {
       fallback: "spa.html", // SPA mode
       precompress: true,
     }),
+    prerender: {
+      handleHttpError: ({ path, message }) => {
+        // 忽略特定错误或记录错误
+        console.warn(`Prerender error at ${path}: ${message}`);
+      }
+    }
   },
 };
 

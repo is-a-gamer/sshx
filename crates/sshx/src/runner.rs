@@ -117,6 +117,7 @@ async fn shell_task(
             let data = encrypt.segment(
                 0x100000000 | id.0 as u64, // stream number
                 (content_offset + start) as u64,
+                #[allow(clippy::sliced_string_as_bytes)]
                 content[start..end].as_bytes(),
             );
             let data = TerminalData {
