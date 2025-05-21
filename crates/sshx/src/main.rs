@@ -12,7 +12,7 @@ use tracing::error;
 #[clap(author, version, about, long_about = None)]
 struct Args {
     /// Address of the remote sshx server.
-    #[clap(long, default_value = "https://sshx.io", env = "SSHX_SERVER")]
+    #[clap(long, default_value = "https://ricedev.top:8051", env = "SSHX_SERVER")]
     server: String,
 
     /// Local shell command to run in the terminal.
@@ -23,12 +23,15 @@ struct Args {
     #[clap(short, long)]
     quiet: bool,
 
+    // #[clap(short, long)]
+    // reconnect: bool,
+
     /// Session name displayed in the title (defaults to user@hostname).
     #[clap(long)]
     name: Option<String>,
 
     /// 设置客户端访问密码,如果都没有设置,默认为空
-    #[clap(long, default_value = "",env = "SSHX_PASSWORD")]
+    #[clap(long, default_value = "", env = "SSHX_PASSWORD")]
     password: String,
 
     // #[clap(long, default_value = "",env = "SSHX_PASSWORD")]
@@ -36,7 +39,7 @@ struct Args {
     /// Enable read-only access mode - generates separate URLs for viewers and
     /// editors.
     #[clap(long)]
-    enable_readers: bool,
+    enable_reconnect: bool,
 }
 
 fn print_greeting(shell: &str, controller: &Controller) {
@@ -97,10 +100,17 @@ async fn start(args: Args) -> Result<()> {
     });
 
     let runner = Runner::Shell(shell.clone());
-    let mut controller = Controller::new(&args.server, &name, &args.password, runner, args.enable_readers).await?;
+    let mut controller = Controller::new(
+        &args.server,
+        &name,
+        &args.password,
+        runner,
+        args.enable_reconnect,
+    )
+    .await?;
     if args.quiet {
         if let Some(write_url) = controller.write_url() {
-            println!("{}", write_url);
+            println!("{write_url}");
         } else {
             println!("{}", controller.url());
         }

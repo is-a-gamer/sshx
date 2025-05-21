@@ -18,7 +18,7 @@ struct Args {
     port: u16,
 
     /// Which IP address or network interface to listen on.
-    #[clap(long, value_parser, default_value = "::1")]
+    #[clap(long, value_parser, default_value = "0.0.0.0")]
     listen: IpAddr,
 
     /// Secret used for signing session tokens.

@@ -8,6 +8,7 @@
   export let open: boolean;
 
   let inputName: string;
+  let inputPassword: string;
   let inputTheme: ThemeName;
   let inputScrollback: number;
 
@@ -16,6 +17,7 @@
   $: if (!initialized) {
     initialized = true;
     inputName = $settings.name;
+    inputPassword = $settings.password;
     inputTheme = $settings.theme;
     inputScrollback = $settings.scrollback;
   }
@@ -43,6 +45,25 @@
           on:input={() => {
             if (inputName.length >= 2) {
               updateSettings({ name: inputName });
+            }
+          }}
+        />
+      </div>
+    </div>
+    <div class="item">
+      <div>
+        <p class="item-title">Password</p>
+        <p class="item-subtitle">Choose your admin password</p>
+      </div>
+      <div>
+        <input
+          class="input-common"
+          placeholder="password"
+          bind:value={inputPassword}
+          maxlength="50"
+          on:input={() => {
+            if (inputPassword.length >= 2) {
+              updateSettings({ password: inputPassword });
             }
           }}
         />
@@ -101,7 +122,7 @@
   <!-- svelte-ignore missing-declaration -->
   <p class="mt-6 text-sm text-right text-zinc-400">
     <a target="_blank" rel="noreferrer" href="https://github.com/ekzhang/sshx"
-    >sshx-server v{__APP_VERSION__}</a
+      >sshx-server v{__APP_VERSION__}</a
     >
   </p>
 </OverlayMenu>
