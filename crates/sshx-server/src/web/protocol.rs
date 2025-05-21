@@ -67,6 +67,8 @@ pub enum WsServer {
     Pong(u64),
     /// Alert the client of an application error.
     Error(String),
+    /// 接收到服务器的踢出信息,将不再尝试重连
+    Kick(String),
 }
 
 /// A real-time message sent from the client over WebSocket.
@@ -96,4 +98,6 @@ pub enum WsClient {
     Chat(String),
     /// Send a ping to the server, for latency measurement.
     Ping(u64),
+    /// 接收到服务器的踢出信息,将不再尝试重连
+    Kick(String),
 }

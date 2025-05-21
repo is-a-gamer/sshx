@@ -7,14 +7,16 @@ use axum::extract::{
     Path, State,
 };
 use axum::response::IntoResponse;
+use axum::Json;
 use bytes::Bytes;
 use futures_util::SinkExt;
+use http::HeaderMap;
 use sshx_core::proto::{server_update::ServerMessage, NewShell, TerminalInput, TerminalSize};
 use sshx_core::Sid;
 use subtle::ConstantTimeEq;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
-use tracing::{error, info_span, warn, Instrument};
+use tracing::{error, info, info_span, warn, Instrument};
 
 use crate::session::Session;
 use crate::web::protocol::{WsClient, WsServer};
@@ -246,6 +248,11 @@ async fn handle_socket(socket: &mut WebSocket, session: Arc<Session>) -> Result<
             WsClient::Ping(ts) => {
                 send(socket, WsServer::Pong(ts)).await?;
             }
+            WsClient::Kick(_) => {
+                info!("kicked session {}", session.metadata().name.clone());
+                update_tx.send(ServerMessage::Kick(session.metadata().name.clone())).await?;
+                socket.close().await?;
+            }
         }
     }
     Ok(())
@@ -308,4 +315,19 @@ async fn proxy_redirect(socket: &mut WebSocket, host: &str, name: &str) -> Resul
     }
 
     Ok(())
+}
+pub async fn get_session_list(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let auth_str = headers.get("Authorization");
+    // let s = Vec::<String>::new();
+    if auth_str.unwrap().is_empty() {
+        return Json(Vec::<String>::new());
+    }
+    if auth_str.unwrap().to_str().unwrap_or_default() != state.secret {
+        return Json(Vec::<String>::new());
+    }
+    let session_names = state.get_all_session_names();
+    Json(session_names)
 }

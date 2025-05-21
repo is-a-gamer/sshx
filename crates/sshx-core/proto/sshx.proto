@@ -72,6 +72,7 @@ message ClientUpdate {
     uint32 closed_shell = 4;    // Acknowledge that a shell was closed.
     fixed64 pong = 14;          // Response for latency measurement.
     string error = 15;
+    string kick = 16;
   }
 }
 
@@ -85,6 +86,7 @@ message ServerUpdate {
     TerminalSize resize = 5;   // Resize a terminal window.
     fixed64 ping = 14;         // Request a pong, with the timestamp.
     string error = 15;
+    string kick = 16;
   }
 }
 

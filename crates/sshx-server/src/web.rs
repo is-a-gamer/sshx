@@ -2,11 +2,9 @@
 
 use std::sync::Arc;
 
-use axum::extract::State;
-use axum::http::header::HeaderMap;
 use axum::response::IntoResponse;
 use axum::routing::{any, get_service};
-use axum::{Json, Router};
+use axum::Router;
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::ServerState;
@@ -36,21 +34,6 @@ pub fn app(state: &Arc<ServerState>) -> Router<Arc<ServerState>> {
 fn backend() -> Router<Arc<ServerState>> {
     Router::new()
         .route("/s/{name}", any(socket::get_session_ws))
-        .route("/session/list", any(get_session_list))
+        .route("/session/list", any(socket::get_session_list))
     // Json(state.get_all_session_names())
-}
-async fn get_session_list(
-    State(state): State<Arc<ServerState>>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    let auth_str = headers.get("Authorization");
-    // let s = Vec::<String>::new();
-    if auth_str.unwrap().is_empty() {
-        return Json(Vec::<String>::new());
-    }
-    if auth_str.unwrap().to_str().unwrap_or_default() != state.secret {
-        return Json(Vec::<String>::new());
-    }
-    let session_names = state.get_all_session_names();
-    Json(session_names)
 }

@@ -1,26 +1,22 @@
-<script lang="ts">
+<script lang="ts" xmlns="http://www.w3.org/1999/html">
   import {
     onDestroy,
     onMount,
     tick,
     beforeUpdate,
     afterUpdate,
-    createEventDispatcher,
   } from "svelte";
   import { fade } from "svelte/transition";
   import { debounce, throttle } from "lodash-es";
 
   import { Encrypt } from "./encrypt";
-  import { createLock } from "./lock";
   import { Srocket } from "./srocket";
   import type { WsClient, WsServer, WsUser, WsWinsize } from "./protocol";
   import { makeToast } from "./toast";
   import Chat, { type ChatMessage } from "./ui/Chat.svelte";
-  import ChooseName from "./ui/ChooseName.svelte";
+  import ChooseAdminPassword from "./ui/ChooseAdminPassword.svelte";
   import NameList from "./ui/NameList.svelte";
   import NetworkInfo from "./ui/NetworkInfo.svelte";
-  import Settings from "./ui/Settings.svelte";
-  import Toolbar from "./ui/Toolbar.svelte";
   import XTerm from "./ui/XTerm.svelte";
   import Avatars from "./ui/Avatars.svelte";
   import LiveCursor from "./ui/LiveCursor.svelte";
@@ -29,11 +25,10 @@
   import { arrangeNewTerminal } from "./arrange";
   import { settings } from "./settings";
   import { EyeIcon } from "svelte-feather-icons";
+  import AdminSettings from "$lib/ui/AdminSettings.svelte";
+  import ShowSession from "$lib/ui/ShowSession.svelte";
 
-  export let id: string;
-
-  const dispatch = createEventDispatcher<{ receiveName: string }>();
-
+  // export let id: string;
   // The magic numbers "left" and "top" are used to approximately center the
   // terminal at the time that it is first created.
   const CONSTANT_OFFSET_LEFT = 378;
@@ -97,18 +92,19 @@
   let srocket: Srocket<WsServer, WsClient> | null = null;
 
   let connected = false;
+  let sessions = [];
   let exitReason: string | null = null;
 
   /** Bound "write" method for each terminal. */
   const writers: Record<number, (data: string) => void> = {};
   const termWrappers: Record<number, HTMLDivElement> = {};
   const termElements: Record<number, HTMLDivElement> = {};
-  const chunknums: Record<number, number> = {};
-  const locks: Record<number, any> = {};
+  // const chunknums: Record<number, number> = {};
+  // const locks: Record<number, any> = {};
   let userId = 0;
   let users: [number, WsUser][] = [];
   let shells: [number, WsWinsize][] = [];
-  let subscriptions = new Set<number>();
+  // let subscriptions = new Set<number>();
 
   // May be undefined before `users` is first populated.
   $: hasWriteAccess = users.find(([uid]) => uid === userId)?.[1]?.canWrite;
@@ -128,115 +124,25 @@
 
   let serverLatencies: number[] = [];
   let shellLatencies: number[] = [];
-
-  onMount(async () => {
-    // The page hash sets the end-to-end encryption key.
-    const key = window.location.hash?.slice(1).split(",")[0] ?? "";
-    const writePassword = window.location.hash?.slice(1).split(",")[1] ?? null;
-
-    encrypt = await Encrypt.new(key);
-    const encryptedZeros = await encrypt.zeros();
-
-    const writeEncryptedZeros = writePassword
-      ? await (await Encrypt.new(writePassword)).zeros()
-      : null;
-
-    srocket = new Srocket<WsServer, WsClient>(`/api/s/${id}`, {
-      onMessage(message) {
-        if (message.hello) {
-          userId = message.hello[0];
-          dispatch("receiveName", message.hello[1]);
-          makeToast({
-            kind: "success",
-            message: `Connected to the server.`,
-          });
-          exitReason = null;
-        } else if (message.invalidAuth) {
-          exitReason =
-            "The URL is not correct, invalid end-to-end encryption key.";
-          srocket?.dispose();
-        } else if (message.chunks) {
-          let [id, seqnum, chunks] = message.chunks;
-          locks[id](async () => {
-            await tick();
-            chunknums[id] += chunks.length;
-            for (const data of chunks) {
-              const buf = await encrypt.segment(
-                0x100000000n | BigInt(id),
-                BigInt(seqnum),
-                data,
-              );
-              seqnum += data.length;
-              writers[id](new TextDecoder().decode(buf));
-            }
-          });
-        } else if (message.users) {
-          users = message.users;
-        } else if (message.userDiff) {
-          const [id, update] = message.userDiff;
-          users = users.filter(([uid]) => uid !== id);
-          if (update !== null) {
-            users = [...users, [id, update]];
-          }
-        } else if (message.shells) {
-          shells = message.shells;
-          if (movingIsDone) {
-            moving = -1;
-          }
-          for (const [id] of message.shells) {
-            if (!subscriptions.has(id)) {
-              chunknums[id] ??= 0;
-              locks[id] ??= createLock();
-              subscriptions.add(id);
-              srocket?.send({ subscribe: [id, chunknums[id]] });
-            }
-          }
-        } else if (message.hear) {
-          const [uid, name, msg] = message.hear;
-          chatMessages.push({ uid, name, msg, sentAt: new Date() });
-          chatMessages = chatMessages;
-          if (!showChat) newMessages = true;
-        } else if (message.shellLatency !== undefined) {
-          const shellLatency = Number(message.shellLatency);
-          shellLatencies = [...shellLatencies, shellLatency].slice(-10);
-        } else if (message.pong !== undefined) {
-          const serverLatency = Date.now() - Number(message.pong);
-          serverLatencies = [...serverLatencies, serverLatency].slice(-10);
-        } else if (message.error) {
-          console.warn("Server error: " + message.error);
-        } else if (message.kick) {
-          console.log("close this session")
-        }
-      },
-
-      onConnect() {
-        srocket?.send({ authenticate: [encryptedZeros, writeEncryptedZeros] });
-        if ($settings.name) {
-          srocket?.send({ setName: $settings.name });
-        }
-        connected = true;
-      },
-
-      onDisconnect() {
-        connected = false;
-        subscriptions.clear();
-        users = [];
-        serverLatencies = [];
-        shellLatencies = [];
-      },
-
-      onClose(event) {
-        if (event.code === 4404) {
-          exitReason = "Failed to connect: " + event.reason;
-        } else if (event.code === 4500) {
-          exitReason = "Internal server error: " + event.reason;
-        }
-      },
-    });
-  });
-
   onDestroy(() => srocket?.dispose());
-
+  onMount(async () => {
+    while (true) {
+      const response = await fetch("/api/session/list", {
+        method: "post",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `${$settings.password}`,
+        },
+      });
+      if (response.ok) {
+        response.json().then((data) => {
+          sessions = data;
+        });
+      }
+      await tick();
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+  });
   // Send periodic ping messages for latency estimation.
   onMount(() => {
     const pingIntervalId = window.setInterval(() => {
@@ -288,17 +194,6 @@
     const { x, y } = arrangeNewTerminal(existing);
     srocket?.send({ create: [x, y] });
     touchZoom.moveTo([x, y], INITIAL_ZOOM);
-  }
-  async function handleClose() {
-    if (hasWriteAccess === false) {
-      makeToast({
-        kind: "info",
-        message: "You are in read-only mode and cannot create new terminals.",
-      });
-      return;
-    }
-    srocket?.send({ kick: id });
-    // touchZoom.moveTo([x, y], INITIAL_ZOOM);
   }
 
   async function handleInput(id: number, data: Uint8Array) {
@@ -412,23 +307,41 @@
   <div
     class="absolute top-8 inset-x-0 flex justify-center pointer-events-none z-10"
   >
-    <Toolbar
-      {connected}
-      {newMessages}
-      {hasWriteAccess}
-      on:create={handleCreate}
-      on:chat={() => {
+    <!--    <Toolbar-->
+    <!--      {connected}-->
+    <!--      {newMessages}-->
+    <!--      {hasWriteAccess}-->
+    <!--      on:create={handleCreate}-->
+    <!--      on:chat={() => {-->
+    <!--        showChat = !showChat;-->
+    <!--        newMessages = false;-->
+    <!--      }}-->
+    <!--      on:settings={() => {-->
+    <!--        settingsOpen = true;-->
+    <!--      }}-->
+    <!--      on:networkInfo={() => {-->
+    <!--        showNetworkInfo = !showNetworkInfo;-->
+    <!--      }}-->
+    <!--    />-->
+
+    <div>
+      <ShowSession
+
+        {sessions}
+        on:create={handleCreate}
+        on:chat={() => {
         showChat = !showChat;
-        newMessages = false;
-      }}
-      on:settings={() => {
-        settingsOpen = true;
-      }}
-      on:kick={handleClose}
-      on:networkInfo={() => {
-        showNetworkInfo = !showNetworkInfo;
-      }}
-    />
+          newMessages = false;
+        }}
+        on:settings={() => {
+          settingsOpen = true;
+        }}
+        on:networkInfo={() => {
+          showNetworkInfo = !showNetworkInfo;
+        }}
+      />
+    </div>
+
 
     {#if showNetworkInfo}
       <div class="absolute top-20 translate-x-[116.5px]">
@@ -444,7 +357,6 @@
       </div>
     {/if}
   </div>
-
   {#if showChat}
     <div
       class="absolute flex flex-col justify-end inset-y-4 right-4 w-80 pointer-events-none z-10"
@@ -458,9 +370,9 @@
     </div>
   {/if}
 
-  <Settings open={settingsOpen} on:close={() => (settingsOpen = false)} />
+  <AdminSettings open={settingsOpen} on:close={() => (settingsOpen = false)} />
 
-  <ChooseName />
+  <ChooseAdminPassword />
 
   <!--
     Dotted circle background appears underneath the rest of the elements, but
@@ -489,14 +401,13 @@
         {/if}
       </div>
     {:else}
-      <div class="text-yellow-400">Connecting…</div>
+      <div class="text-yellow-400">admin page</div>
     {/if}
 
     <div class="mt-4">
       <NameList {users} />
     </div>
   </div>
-
   <div class="absolute inset-0 overflow-hidden touch-none" bind:this={fabricEl}>
     {#each shells as [id, winsize] (id)}
       {@const ws = id === moving ? movingSize : winsize}
@@ -598,4 +509,5 @@
       </div>
     {/each}
   </div>
+
 </main>
