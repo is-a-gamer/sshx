@@ -19,6 +19,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::time;
 use tokio_tungstenite::{tungstenite::Message, MaybeTlsStream, WebSocketStream};
 use tonic::transport::Channel;
+use tracing::info;
 
 /// An ephemeral, isolated server that is created for each test.
 pub struct TestServer {
@@ -190,6 +191,7 @@ impl ClientSocket {
                     WsServer::ShellLatency(_) => {}
                     WsServer::Pong(_) => {}
                     WsServer::Error(err) => self.errors.push(err),
+                    WsServer::Kick(_)=> info!("close this session now"),
                 }
             }
         };

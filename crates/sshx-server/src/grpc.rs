@@ -221,6 +221,9 @@ async fn handle_update(tx: &ServerTx, session: &Session, update: ClientUpdate) -
             // TODO: Propagate these errors to listeners on the web interface?
             error!(?err, "error received from client");
         }
+        Some(ClientMessage::Kick(kick)) => {
+            info!("kicked session id is {}",kick);
+        }
         None => (), // Heartbeat message, ignored.
     }
     true

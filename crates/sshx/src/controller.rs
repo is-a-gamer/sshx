@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::pin::pin;
 use std::process::exit;
 use anyhow::{Context, Result};
+use tokio::io::AsyncWriteExt;
 use sshx_core::proto::{
     client_update::ClientMessage, server_update::ServerMessage,
     sshx_service_client::SshxServiceClient, ClientUpdate, CloseRequest, NewShell, OpenRequest,
@@ -160,7 +161,8 @@ impl Controller {
                             &self.name,
                             &self.password,
                             self.runner.clone(),
-                            self.write_url.is_some(),
+                            self.enable_reconnect,
+                            // self.write_url.is_some(),
                         )
                         .await
                         {
@@ -271,10 +273,21 @@ impl Controller {
                 }
                 ServerMessage::Ping(ts) => {
                     // Echo back the timestamp, for stateless latency measurement.
+                    // info!("this ping msg");
                     send_msg(&tx, ClientMessage::Pong(ts)).await?;
                 }
                 ServerMessage::Error(err) => {
                     error!(?err, "error received from server");
+                }
+                ServerMessage::Kick(_) => {
+                    info!("server kick this session");
+                    let req = CloseRequest {
+                        name: self.name.clone(),
+                        token: self.token.clone(),
+                    };
+                    let mut client = Self::connect(&self.origin).await?;
+                    client.close(req).await?;
+                    exit(0)
                 }
             }
         }

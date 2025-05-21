@@ -7,7 +7,7 @@
     WifiIcon,
   } from "svelte-feather-icons";
 
-  import logo from "$lib/assets/logo.svg";
+  import logo from "$lib/assets/jyhpc.png";
 
   export let connected: boolean;
   export let hasWriteAccess: boolean | undefined;
@@ -27,7 +27,7 @@
     <a href="/" class="flex-shrink-0"
       ><img src={logo} alt="sshx logo" class="h-10" /></a
     >
-    <p class="ml-1.5 mr-2 font-medium">sshx</p>
+    <p class="ml-1.5 mr-2 font-medium">景阳雷诺 | 协助工具</p>
 
     <div class="v-divider" />
 
