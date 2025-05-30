@@ -23,8 +23,6 @@ use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tracing::{error, info, info_span, warn, Instrument};
 use axum::http::StatusCode;
-use futures_util::stream::Stream;
-use std::pin::Pin;
 
 use crate::session::Session;
 use crate::web::protocol::{WsClient, WsServer};
@@ -393,7 +391,7 @@ pub async fn upload_file(
         None => return (StatusCode::BAD_REQUEST, "Session not found").into_response(),
     };
     let token = format!("{}|{}", session_name, uuid::Uuid::new_v4().to_string());
-
+    
     // const _CHUNK_SIZE: usize = 8 * 1024 * 1024; // 8MB chunks
     let mut target_path = String::new();
 
@@ -495,7 +493,10 @@ pub async fn download_file(
         Ok(stream) => {
             // 将响应流转换为字节流
             let byte_stream = stream.map(|result| {
-                result.and_then(|response| Ok(response.chunk))
+                match result {
+                    Ok(response) => Ok(response.chunk),
+                    Err(e) => Err(e)
+                }
             });
 
             // 创建Body响应
@@ -512,6 +513,11 @@ pub async fn download_file(
                 format!("attachment; filename=\"{}\"", filename)
                     .parse()
                     .unwrap(),
+            );
+            // 添加 Accept-Ranges 头，表明支持断点续传
+            headers.insert(
+                axum::http::header::ACCEPT_RANGES,
+                "bytes".parse().unwrap(),
             );
 
             (StatusCode::OK, headers, body).into_response()

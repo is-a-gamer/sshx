@@ -1,6 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher } from "svelte";
   import {
+  FolderIcon,
     MessageSquareIcon,
     PlusCircleIcon, PowerIcon,
     SettingsIcon,
@@ -18,6 +19,7 @@
     chat: void;
     settings: void;
     kick: void;
+    filemanger: void;
     networkInfo: void;
   }>();
 </script>
@@ -50,6 +52,9 @@
           <div class="activity" />
         {/if}
       </button>
+      <button class="icon-button" on:click={() => dispatch("filemanger")}>
+        <FolderIcon strokeWidth={1.5} class="p-0.5" />
+      </button>
       <button class="icon-button" on:click={() => dispatch("settings")}>
         <SettingsIcon strokeWidth={1.5} class="p-0.5" />
       </button>
@@ -62,7 +67,7 @@
         <WifiIcon strokeWidth={1.5} class="p-0.5" />
       </button>
       <button class="icon-button" on:click={() => dispatch("kick")}>
-        <PowerIcon  strokeWidth={1.5} class="p-0.5" style={"color: #da2b2b;"} />
+        <PowerIcon  strokeWidth={1.5} class="p-0.5" />
       </button>
     </div>
   </div>

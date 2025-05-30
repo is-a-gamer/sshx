@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 use tokio::time::{self, MissedTickBehavior};
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use tonic::{Request, Response, Status, Streaming};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use bytes::Bytes;
 
 use crate::session::{Metadata, Session};
@@ -296,7 +296,7 @@ async fn handle_update(tx: &ServerTx, session: &Session, update: ClientUpdate) -
             info!("kicked session id is {}",kick);
         }
         Some(ClientMessage::ListDirectoryResult(result)) => {
-            info!("收到客户端返回的目录列表结果: request_id: {}, result: {:?}", result.request_id, result);
+            debug!("收到客户端返回的目录列表结果: request_id: {}, result: {:?}", result.request_id, result);
             session.handle_list_directory_result(
                 result.request_id,
                 result.error,
@@ -304,7 +304,7 @@ async fn handle_update(tx: &ServerTx, session: &Session, update: ClientUpdate) -
             );
         }
         Some(ClientMessage::UploadFileResult(result)) => {
-            info!("收到客户端返回的文件上传结果: request_id: {}", result.request_id);
+            debug!("收到客户端返回的文件上传结果: request_id: {}", result.request_id);
             session.handle_upload_file_result(
                 result.request_id,
                 result.error,
@@ -312,7 +312,7 @@ async fn handle_update(tx: &ServerTx, session: &Session, update: ClientUpdate) -
             );
         }
         Some(ClientMessage::DownloadFileResult(result)) => {
-            info!("收到客户端返回的文件下载结果: request_id: {}", result.request_id);
+            debug!("收到客户端返回的文件下载结果: request_id: {}", result.request_id);
             if let Some(error) = result.error {
                 error!("文件下载出错: {}", error);
                 session.handle_download_file_chunk(

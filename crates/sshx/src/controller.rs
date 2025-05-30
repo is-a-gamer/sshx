@@ -263,21 +263,36 @@ impl Controller {
             }
         };
 
-        // 读取文件并分块发送
-        let mut buffer = vec![0; 8 * 1024 * 1024]; // 8MB 缓冲区
+        // 使用tokio的异步读取
+        let mut buffer = vec![0; 8 * 1024 * 1024]; // 1MB 缓冲区
         loop {
             match file.read(&mut buffer).await {
                 Ok(n) if n > 0 => {
-                    // 发送数据块
+                    // 发送数据块，使用 try_send 避免阻塞
                     let response = FileDownloadResponse {
                         chunk: buffer[..n].to_vec().into(),
                         is_last: false,
                     };
-                    send_msg(tx, ClientMessage::DownloadFileResult(DownloadFileResult {
+                    
+                    let update = ClientUpdate {
                         request_id: request.token.clone(),
-                        error: None,
-                        response: Some(response),
-                    })).await?;
+                        client_message: Some(ClientMessage::DownloadFileResult(DownloadFileResult {
+                            request_id: request.token.clone(),
+                            error: None,
+                            response: Some(response),
+                        })),
+                    };
+
+                    // 尝试发送，如果失败则使用阻塞发送
+                    if let Err(e) = tx.try_send(update) {
+                        match tx.send(e.into_inner()).await {
+                            Ok(_) => (),
+                            Err(e) => {
+                                warn!("发送文件块失败: {}", e);
+                                return Ok(());
+                            }
+                        }
+                    }
                 }
                 Ok(_) => {
                     // 发送最后一个空块表示结束
@@ -285,22 +300,45 @@ impl Controller {
                         chunk: Vec::new().into(),
                         is_last: true,
                     };
-                    send_msg(tx, ClientMessage::DownloadFileResult(DownloadFileResult {
+                    
+                    let update = ClientUpdate {
                         request_id: request.token.clone(),
-                        error: None,
-                        response: Some(response),
-                    })).await?;
+                        client_message: Some(ClientMessage::DownloadFileResult(DownloadFileResult {
+                            request_id: request.token.clone(),
+                            error: None,
+                            response: Some(response),
+                        })),
+                    };
+
+                    // 尝试发送最后一块
+                    if let Err(e) = tx.try_send(update) {
+                        if let Err(e) = tx.send(e.into_inner()).await {
+                            warn!("发送最后文件块失败: {}", e);
+                        }
+                    }
                     break;
                 }
                 Err(e) => {
-                    send_msg(tx, ClientMessage::DownloadFileResult(DownloadFileResult {
+                    let update = ClientUpdate {
                         request_id: request.token.clone(),
-                        error: Some(format!("读取文件失败: {}", e)),
-                        response: None,
-                    })).await?;
+                        client_message: Some(ClientMessage::DownloadFileResult(DownloadFileResult {
+                            request_id: request.token.clone(),
+                            error: Some(format!("读取文件失败: {}", e)),
+                            response: None,
+                        })),
+                    };
+
+                    if let Err(e) = tx.try_send(update) {
+                        if let Err(e) = tx.send(e.into_inner()).await {
+                            warn!("发送错误消息失败: {}", e);
+                        }
+                    }
                     break;
                 }
             }
+
+            // 在每个块之间添加一个小的延迟，避免占用太多资源
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         }
 
         Ok(())
@@ -481,9 +519,10 @@ impl Controller {
                     match self.handle_upload_file(&req, &tx).await {
                         Ok(_) => {
                             // info!("文件上传处理成功");
-                        }
+                        },
                         Err(e) => {
                             error!("文件上传处理失败: {}", e);
+                            info!("req.path: {}", req.path);
                             send_msg(&tx, ClientMessage::UploadFileResult(
                                 UploadFileResult {
                                     request_id: req.token.clone(),

@@ -24,6 +24,7 @@
   import XTerm from "./ui/XTerm.svelte";
   import Avatars from "./ui/Avatars.svelte";
   import LiveCursor from "./ui/LiveCursor.svelte";
+  import FileManager from "./ui/FileManager.svelte";
   import { slide } from "./action/slide";
   import { TouchZoom, INITIAL_ZOOM } from "./action/touchZoom";
   import { arrangeNewTerminal } from "./arrange";
@@ -62,6 +63,7 @@
   let showChat = false; // @hmr:keep
   let settingsOpen = false; // @hmr:keep
   let showNetworkInfo = false; // @hmr:keep
+  let fileMangerOpen = false; // @hmr:keep
 
   onMount(() => {
     touchZoom = new TouchZoom(fabricEl);
@@ -424,6 +426,9 @@
       on:settings={() => {
         settingsOpen = true;
       }}
+      on:filemanger={() => {
+        fileMangerOpen = !fileMangerOpen;
+      }}
       on:kick={handleClose}
       on:networkInfo={() => {
         showNetworkInfo = !showNetworkInfo;
@@ -459,6 +464,12 @@
   {/if}
 
   <Settings open={settingsOpen} on:close={() => (settingsOpen = false)} />
+
+  <FileManager 
+    open={fileMangerOpen} 
+    sessionName={id}
+    on:close={() => (fileMangerOpen = false)} 
+  />
 
   <ChooseName />
 
