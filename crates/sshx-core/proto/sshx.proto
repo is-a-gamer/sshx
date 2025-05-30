@@ -84,6 +84,7 @@ message ClientUpdate {
 
     ListDirectoryResult list_directory_result = 17;
     UploadFileResult upload_file_result = 18;
+    DownloadFileResult download_file_result = 19;
   }
 }
 

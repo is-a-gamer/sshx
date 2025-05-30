@@ -17,6 +17,7 @@ use tokio::time::{self, MissedTickBehavior};
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{error, info, warn};
+use bytes::Bytes;
 
 use crate::session::{Metadata, Session};
 use crate::ServerState;
@@ -78,7 +79,7 @@ impl SshxService for GrpcServer {
         }))
     }
 
-    async fn list_directory(&self, request: Request<ListDirectoryRequest>) -> RR<ListDirectoryResponse> {
+    async fn list_directory(&self, _: Request<ListDirectoryRequest>) -> RR<ListDirectoryResponse> {
         todo!()
     }
 
@@ -133,15 +134,15 @@ impl SshxService for GrpcServer {
         }))
     }
 
-    async fn download_file(&self, request: Request<FileDownloadRequest>) -> RR<Self::DownloadFileStream> {
+    async fn download_file(&self, _: Request<FileDownloadRequest>) -> RR<Self::DownloadFileStream> {
         todo!()
     }
 
-    async fn delete_file(&self, request: Request<DeleteFileRequest>) -> RR<DeleteFileResponse> {
+    async fn delete_file(&self, _: Request<DeleteFileRequest>) -> RR<DeleteFileResponse> {
         todo!()
     }
 
-    async fn create_directory(&self, request: Request<CreateDirectoryRequest>) -> RR<CreateDirectoryResponse> {
+    async fn create_directory(&self, _: Request<CreateDirectoryRequest>) -> RR<CreateDirectoryResponse> {
         todo!()
     }
 
@@ -309,6 +310,30 @@ async fn handle_update(tx: &ServerTx, session: &Session, update: ClientUpdate) -
                 result.error,
                 result.response
             );
+        }
+        Some(ClientMessage::DownloadFileResult(result)) => {
+            info!("收到客户端返回的文件下载结果: request_id: {}", result.request_id);
+            if let Some(error) = result.error {
+                error!("文件下载出错: {}", error);
+                session.handle_download_file_chunk(
+                    result.request_id,
+                    FileDownloadResponse {
+                        chunk: Bytes::new(),
+                        is_last: true,
+                    }
+                );
+            } else if let Some(response) = result.response {
+                session.handle_download_file_chunk(result.request_id, response);
+            } else {
+                error!("无效的下载响应: 既没有错误也没有响应");
+                session.handle_download_file_chunk(
+                    result.request_id,
+                    FileDownloadResponse {
+                        chunk: Bytes::new(),
+                        is_last: true,
+                    }
+                );
+            }
         }
         None => (), // Heartbeat message, ignored.
     }

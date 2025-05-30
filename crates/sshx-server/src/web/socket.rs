@@ -9,12 +9,13 @@ use axum::extract::{
 use axum::extract::multipart::Multipart;
 use axum::response::IntoResponse;
 use axum::Json;
+use axum::body::Body;
 use bytes::Bytes;
 use futures_util::SinkExt;
 use http::HeaderMap;
 use sshx_core::proto::{
     server_update::ServerMessage, ListDirectoryRequest, NewShell, TerminalInput, TerminalSize,
-    FileUploadRequest, FileUploadResponse,
+    FileUploadRequest, FileDownloadRequest,
 };
 use sshx_core::Sid;
 use subtle::ConstantTimeEq;
@@ -22,6 +23,8 @@ use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tracing::{error, info, info_span, warn, Instrument};
 use axum::http::StatusCode;
+use futures_util::stream::Stream;
+use std::pin::Pin;
 
 use crate::session::Session;
 use crate::web::protocol::{WsClient, WsServer};
@@ -452,4 +455,69 @@ pub async fn upload_file(
     }
 
     (StatusCode::BAD_REQUEST, "Missing file or path field").into_response()
+}
+
+pub async fn download_file(
+    Path(path): Path<String>,
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    // 克隆path用于后续使用
+    let filename = path.split('/').last().unwrap_or("download").to_string();
+    
+    // 获取会话名称
+    let session_name = match headers.get("Session") {
+        Some(name) => name.to_str().unwrap_or_default(),
+        None => return (StatusCode::BAD_REQUEST, "Session name is required").into_response(),
+    };
+
+    if session_name.is_empty() {
+        return (StatusCode::BAD_REQUEST, "Session name cannot be empty").into_response();
+    }
+
+    // 获取会话实例
+    let session = match state.lookup(session_name) {
+        Some(session) => session,
+        None => return (StatusCode::BAD_REQUEST, "Session not found").into_response(),
+    };
+
+    // 生成请求token
+    let token = format!("{}|{}", session_name, uuid::Uuid::new_v4().to_string());
+
+    // 创建下载请求
+    let request = FileDownloadRequest {
+        path,
+        token: token.clone(),
+    };
+
+    // 发送下载请求并获取响应流
+    match session.download_file(request).await {
+        Ok(stream) => {
+            // 将响应流转换为字节流
+            let byte_stream = stream.map(|result| {
+                result.and_then(|response| Ok(response.chunk))
+            });
+
+            // 创建Body响应
+            let body = Body::from_stream(byte_stream);
+            
+            // 设置响应头
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                axum::http::header::CONTENT_TYPE,
+                "application/octet-stream".parse().unwrap(),
+            );
+            headers.insert(
+                axum::http::header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{}\"", filename)
+                    .parse()
+                    .unwrap(),
+            );
+
+            (StatusCode::OK, headers, body).into_response()
+        }
+        Err(e) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+        }
+    }
 }

@@ -10,6 +10,7 @@ use sshx_core::proto::{
     client_update::ClientMessage, server_update::ServerMessage,
     sshx_service_client::SshxServiceClient, ClientUpdate, CloseRequest, NewShell, OpenRequest,
     ListDirectoryResult, ListDirectoryResponse, FileUploadRequest, FileUploadResponse, UploadFileResult,
+    FileDownloadRequest, FileDownloadResponse, DownloadFileResult,
 };
 use sshx_core::Sid;
 use tokio::sync::mpsc;
@@ -21,6 +22,7 @@ use tracing::{debug, error, info, warn};
 use std::collections::HashSet;
 use std::sync::Arc;
 use parking_lot;
+use tokio::io::AsyncReadExt;
 
 use crate::encrypt::Encrypt;
 use crate::runner::{Runner, ShellData};
@@ -154,7 +156,7 @@ impl Controller {
         &self.encryption_key
     }
 
-    async fn list_directory(&self, path: &str, tx: &mpsc::Sender<ClientUpdate>) -> Result<Vec<FileInfo>> {
+    async fn list_directory(&self, path: &str, _: &mpsc::Sender<ClientUpdate>) -> Result<Vec<FileInfo>> {
         let path = std::path::Path::new(&self.webfile_path).join(path);
         let entries = std::fs::read_dir(path)?;
         let mut files = Vec::new();
@@ -229,6 +231,76 @@ impl Controller {
                     }),
                 }
             )).await?;
+        }
+
+        Ok(())
+    }
+
+    /// 处理文件下载请求
+    async fn handle_download_file(&self, request: &FileDownloadRequest, tx: &mpsc::Sender<ClientUpdate>) -> Result<()> {
+        let target_path = std::path::Path::new(&self.webfile_path).join(&request.path);
+        
+        // 检查文件是否存在
+        if !target_path.exists() {
+            send_msg(tx, ClientMessage::DownloadFileResult(DownloadFileResult {
+                request_id: request.token.clone(),
+                error: Some(format!("文件不存在: {}", request.path)),
+                response: None,
+            })).await?;
+            return Ok(());
+        }
+
+        // 打开文件
+        let mut file = match tokio::fs::File::open(&target_path).await {
+            Ok(file) => file,
+            Err(e) => {
+                send_msg(tx, ClientMessage::DownloadFileResult(DownloadFileResult {
+                    request_id: request.token.clone(),
+                    error: Some(format!("无法打开文件: {}", e)),
+                    response: None,
+                })).await?;
+                return Ok(());
+            }
+        };
+
+        // 读取文件并分块发送
+        let mut buffer = vec![0; 8 * 1024 * 1024]; // 8MB 缓冲区
+        loop {
+            match file.read(&mut buffer).await {
+                Ok(n) if n > 0 => {
+                    // 发送数据块
+                    let response = FileDownloadResponse {
+                        chunk: buffer[..n].to_vec().into(),
+                        is_last: false,
+                    };
+                    send_msg(tx, ClientMessage::DownloadFileResult(DownloadFileResult {
+                        request_id: request.token.clone(),
+                        error: None,
+                        response: Some(response),
+                    })).await?;
+                }
+                Ok(_) => {
+                    // 发送最后一个空块表示结束
+                    let response = FileDownloadResponse {
+                        chunk: Vec::new().into(),
+                        is_last: true,
+                    };
+                    send_msg(tx, ClientMessage::DownloadFileResult(DownloadFileResult {
+                        request_id: request.token.clone(),
+                        error: None,
+                        response: Some(response),
+                    })).await?;
+                    break;
+                }
+                Err(e) => {
+                    send_msg(tx, ClientMessage::DownloadFileResult(DownloadFileResult {
+                        request_id: request.token.clone(),
+                        error: Some(format!("读取文件失败: {}", e)),
+                        response: None,
+                    })).await?;
+                    break;
+                }
+            }
         }
 
         Ok(())
@@ -423,7 +495,28 @@ impl Controller {
                     }
                 }
                 ServerMessage::DownloadFile(req) => {
+                    // 如果path为空，这是一个完成通知
+                    if req.path.is_empty() {
+                        debug!("收到下载完成通知: token={}", req.token);
+                        continue;
+                    }
+                    
                     info!("收到服务端的下载请求: {:?}", req);
+                    match self.handle_download_file(&req, &tx).await {
+                        Ok(_) => {
+                            debug!("文件下载处理成功");
+                        }
+                        Err(e) => {
+                            error!("文件下载处理失败: {}", e);
+                            send_msg(&tx, ClientMessage::DownloadFileResult(
+                                DownloadFileResult {
+                                    request_id: req.token.clone(),
+                                    error: Some(format!("文件下载失败: {}", e)),
+                                    response: None,
+                                }
+                            )).await?;
+                        }
+                    }
                 }
                 ServerMessage::DeleteFile(req) => {
                     info!("收到服务端的删除请求: {:?}", req);

@@ -40,6 +40,6 @@ fn backend() -> Router<Arc<ServerState>> {
         .route("/session/list", any(socket::get_session_list))
         .route("/files/list/{*path}", any(socket::list_directory))
         .route("/files/upload", any(socket::upload_file))
-        // .route("/files/list", any(socket::list_directory))
+        .route("/files/download/{*path}", any(socket::download_file))
     // Json(state.get_all_session_names())
 }

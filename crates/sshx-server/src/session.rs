@@ -9,14 +9,14 @@ use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 use parking_lot::{Mutex, RwLock, RwLockWriteGuard};
 use sshx_core::{
-    proto::{server_update::ServerMessage, ListDirectoryRequest, ListDirectoryResponse, SequenceNumbers, ServerUpdate, FileUploadRequest, FileUploadResponse, UploadFileResult},
+    proto::{server_update::ServerMessage, ListDirectoryRequest, ListDirectoryResponse, SequenceNumbers, ServerUpdate, FileUploadRequest, FileUploadResponse, FileDownloadRequest, FileDownloadResponse},
     IdCounter, Sid, Uid,
 };
-use tokio::sync::{broadcast, watch, Notify, oneshot};
-use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream, WatchStream};
-use tokio_stream::Stream;
+use tokio::sync::{broadcast, watch, Notify, oneshot, mpsc};
+use tokio_stream::{wrappers::{errors::BroadcastStreamRecvError, BroadcastStream, WatchStream, ReceiverStream}, Stream};
 use tracing::{debug, error, info, warn};
 use tokio::time::{Instant, timeout};
+use async_channel;
 
 use crate::utils::Shutdown;
 use crate::web::protocol::{WsServer, WsUser, WsWinsize};
@@ -83,6 +83,9 @@ pub struct Session {
 
     /// 等待中的文件上传请求
     pending_upload_file: RwLock<HashMap<String, oneshot::Sender<Result<FileUploadResponse>>>>,
+
+    /// 等待中的文件下载请求
+    pending_download_file: RwLock<HashMap<String, mpsc::Sender<Result<FileDownloadResponse>>>>,
 }
 
 /// 每个shell的内部状态。
@@ -126,6 +129,7 @@ impl Session {
             shutdown: Shutdown::new(),
             pending_list_directory: RwLock::new(HashMap::new()),
             pending_upload_file: RwLock::new(HashMap::new()),
+            pending_download_file: RwLock::new(HashMap::new()),
         }
     }
 
@@ -600,6 +604,77 @@ impl Session {
                 error!("发送文件块失败: {:?}", e);
                 bail!("发送文件块失败: {}", e)
             }
+        }
+    }
+
+    /// 处理文件下载请求
+    pub async fn download_file(&self, request: FileDownloadRequest) -> Result<impl Stream<Item = Result<FileDownloadResponse>>> {
+        debug!("准备发送文件下载请求到客户端");
+        let request_id = request.token.clone();
+        debug!("使用的request_id: {}", request_id);
+        
+        // 创建一个mpsc channel来传输文件块
+        let (tx, rx) = mpsc::channel(32);
+        
+        // 存储发送端
+        {
+            let mut pending = self.pending_download_file.write();
+            pending.insert(request_id.clone(), tx);
+            debug!("存储的pending下载请求数量: {}", pending.len());
+        }
+        
+        // 发送请求到客户端
+        let sve_msg = ServerUpdate {
+            request_id: request_id.clone(),
+            server_message: Some(ServerMessage::DownloadFile(request.clone())),
+        };
+        
+        info!("发送文件下载请求到客户端: {}", request.path);
+        match self.update_tx.send(sve_msg.server_message.unwrap()).await {
+            Ok(_) => debug!("成功发送文件下载请求, request_id: {}", request_id),
+            Err(e) => {
+                error!("发送文件下载请求失败: {:?}", e);
+                // 清理pending请求
+                self.pending_download_file.write().remove(&request_id);
+                bail!("发送请求失败: {}", e);
+            }
+        }
+
+        // 返回接收流
+        Ok(ReceiverStream::new(rx))
+    }
+
+    /// 处理文件下载响应
+    pub fn handle_download_file_chunk(&self, request_id: String, response: FileDownloadResponse) {
+        debug!("开始处理文件下载响应块, request_id: {}", request_id);
+        
+        let mut pending = self.pending_download_file.write();
+        if let Some(sender) = pending.get(&request_id) {
+            debug!("发送文件块到等待的channel, request_id: {}, is_last: {}", request_id, response.is_last);
+            
+            // 发送当前块
+            if sender.try_send(Ok(response.clone())).is_err() {
+                warn!("接收端可能已关闭, request_id: {}", request_id);
+                // 如果发送失败,移除pending状态
+                pending.remove(&request_id);
+                return;
+            }
+            
+            // 如果是最后一块,清理pending状态
+            if response.is_last {
+                debug!("这是最后一块,清理pending状态");
+                pending.remove(&request_id);
+                
+                // 通知客户端下载完成
+                if let Err(e) = self.update_tx.try_send(ServerMessage::DownloadFile(FileDownloadRequest {
+                    path: String::new(),
+                    token: request_id.clone(),
+                })) {
+                    warn!("无法发送下载完成通知到客户端: {}", e);
+                }
+            }
+        } else {
+            warn!("未找到对应的pending下载请求, request_id: {}", request_id);
         }
     }
 }
