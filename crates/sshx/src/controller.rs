@@ -3,12 +3,13 @@
 use std::collections::HashMap;
 use std::pin::pin;
 use std::process::exit;
+use std::io::Write;
 use anyhow::{Context, Result};
 use sshx_core::proto::FileInfo;
 use sshx_core::proto::{
     client_update::ClientMessage, server_update::ServerMessage,
     sshx_service_client::SshxServiceClient, ClientUpdate, CloseRequest, NewShell, OpenRequest,
-    ListDirectoryResult, ListDirectoryResponse,
+    ListDirectoryResult, ListDirectoryResponse, FileUploadRequest, FileUploadResponse, UploadFileResult,
 };
 use sshx_core::Sid;
 use tokio::sync::mpsc;
@@ -124,7 +125,12 @@ impl Controller {
     /// gracefully shutting down, which means connected clients need to start a
     /// new TCP handshake.
     async fn connect(origin: &str) -> Result<SshxServiceClient<Channel>, tonic::transport::Error> {
-        SshxServiceClient::connect(String::from(origin)).await
+        let endpoint = tonic::transport::Endpoint::new(String::from(origin))?;
+        let channel = endpoint.connect().await?;
+        let client = SshxServiceClient::new(channel)
+            .max_encoding_message_size(1024 * 1024 * 1024) // 1GB
+            .max_decoding_message_size(1024 * 1024 * 1024); // 1GB
+        Ok(client)
     }
 
     /// Returns the name of the session.
@@ -175,6 +181,99 @@ impl Controller {
         }
         
         Ok(files)
+    }
+
+    /// 流式上传文件
+    async fn upload_file_stream(&self, path: &str, data: &[u8]) -> Result<()> {
+        let mut client = Self::connect(&self.origin).await?;
+        
+        // 创建一个channel用于发送文件块
+        let (tx, rx) = mpsc::channel(4);
+        
+        // 设置块大小为4MB
+        const CHUNK_SIZE: usize = 4 * 1024 * 1024;
+        
+        // 启动一个任务来分块发送文件
+        let total_size = data.len();
+        let path = path.to_string();
+        let token = format!("{},{}", self.name, self.token);
+        
+        tokio::spawn(async move {
+            let mut offset = 0;
+            while offset < total_size {
+                let end = (offset + CHUNK_SIZE).min(total_size);
+                let chunk = data[offset..end].to_vec();
+                let is_last = end == total_size;
+                
+                let request = FileUploadRequest {
+                    path: path.clone(),
+                    chunk: chunk.into(),
+                    token: token.clone(),
+                    is_last,
+                };
+                
+                if tx.send(request).await.is_err() {
+                    break;
+                }
+                
+                offset = end;
+            }
+        });
+        
+        // 创建请求流
+        let request_stream = ReceiverStream::new(rx);
+        
+        // 发送流式请求
+        match client.upload_file(request_stream).await {
+            Ok(response) => {
+                if let Some(error) = response.into_inner().error {
+                    bail!("文件上传失败: {}", error);
+                }
+                Ok(())
+            }
+            Err(status) => {
+                bail!("文件上传失败: {}", status);
+            }
+        }
+    }
+
+    /// 处理文件上传
+    async fn handle_upload_file(&self, request: &FileUploadRequest, tx: &mpsc::Sender<ClientUpdate>) -> Result<()> {
+        let target_path = std::path::Path::new(&self.webfile_path).join(&request.path);
+        
+        // 确保目标目录存在
+        if let Some(parent) = target_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        // 写入文件
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .append(true)
+            .open(&target_path)?;
+
+        // 写入当前块
+        file.write_all(&request.chunk)?;
+        file.flush()?;
+
+        info!("写入文件块成功, 大小: {} bytes, 是否为最后一块: {}", request.chunk.len(), request.is_last);
+
+        // 只在最后一块时发送成功响应
+        if request.is_last {
+            send_msg(&tx, ClientMessage::UploadFileResult(
+                UploadFileResult {
+                    request_id: request.token.clone(),
+                    error: None,
+                    response: Some(FileUploadResponse {
+                        success: true,
+                        message: "文件上传成功".to_string(),
+                    }),
+                }
+            )).await?;
+        }
+
+        Ok(())
     }
 
     /// Run the controller forever, listening for requests from the server.
@@ -347,7 +446,22 @@ impl Controller {
                     }
                 }
                 ServerMessage::UploadFile(req) => {
-                    info!("收到服务端的上传请求: {:?}", req);
+                    info!("收到服务端的上传请求: {},{}", req.token,req.path);
+                    match self.handle_upload_file(&req, &tx).await {
+                        Ok(_) => {
+                            info!("文件上传处理成功");
+                        }
+                        Err(e) => {
+                            error!("文件上传处理失败: {}", e);
+                            send_msg(&tx, ClientMessage::UploadFileResult(
+                                UploadFileResult {
+                                    request_id: req.token.clone(),
+                                    error: Some(format!("文件上传失败: {}", e)),
+                                    response: None,
+                                }
+                            )).await?;
+                        }
+                    }
                 }
                 ServerMessage::DownloadFile(req) => {
                     info!("收到服务端的下载请求: {:?}", req);

@@ -9,7 +9,7 @@ use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 use parking_lot::{Mutex, RwLock, RwLockWriteGuard};
 use sshx_core::{
-    proto::{server_update::ServerMessage, ListDirectoryRequest, ListDirectoryResponse, SequenceNumbers, ServerUpdate},
+    proto::{server_update::ServerMessage, ListDirectoryRequest, ListDirectoryResponse, SequenceNumbers, ServerUpdate, FileUploadRequest, FileUploadResponse, UploadFileResult},
     IdCounter, Sid, Uid,
 };
 use tokio::sync::{broadcast, watch, Notify, oneshot};
@@ -80,6 +80,9 @@ pub struct Session {
 
     /// 等待中的目录列表请求
     pending_list_directory: RwLock<HashMap<String, oneshot::Sender<Result<ListDirectoryResponse>>>>,
+
+    /// 等待中的文件上传请求
+    pending_upload_file: RwLock<HashMap<String, oneshot::Sender<Result<FileUploadResponse>>>>,
 }
 
 /// 每个shell的内部状态。
@@ -122,6 +125,7 @@ impl Session {
             sync_notify: Notify::new(),
             shutdown: Shutdown::new(),
             pending_list_directory: RwLock::new(HashMap::new()),
+            pending_upload_file: RwLock::new(HashMap::new()),
         }
     }
 
@@ -499,6 +503,103 @@ impl Session {
             sender.send(result).ok();
         } else {
             warn!("未找到对应的pending请求, request_id: {}", request_id);
+        }
+    }
+
+    /// 处理文件上传请求
+    pub async fn upload_file(&self, request: FileUploadRequest) -> Result<FileUploadResponse> {
+        debug!("准备发送文件上传请求到客户端");
+        let request_id = request.token.clone();
+        debug!("使用的request_id: {}", request_id);
+        
+        // 创建一个oneshot channel来等待响应
+        let (tx, rx) = oneshot::channel();
+        
+        // 存储发送端
+        {
+            let mut pending = self.pending_upload_file.write();
+            pending.insert(request_id.clone(), tx);
+            debug!("存储的pending上传请求数量: {}", pending.len());
+        }
+        
+        // 发送请求到客户端
+        let sve_msg = ServerUpdate {
+            request_id: request_id.clone(),
+            server_message: Some(ServerMessage::UploadFile(request.clone())),
+        };
+        
+        info!("发送文件上传请求到客户端: {}", request.token);
+        match self.update_tx.send(sve_msg.server_message.unwrap()).await {
+            Ok(_) => debug!("成功发送文件上传请求, request_id: {}", request_id),
+            Err(e) => {
+                error!("发送文件上传请求失败: {:?}", e);
+                // 清理pending请求
+                self.pending_upload_file.write().remove(&request_id);
+                bail!("发送请求失败: {}", e);
+            }
+        }
+
+        // 等待响应,设置超时时间为30秒
+        match timeout(Duration::from_secs(30), rx).await {
+            Ok(result) => {
+                debug!("收到文件上传响应, request_id: {}, result: {:?}", request_id, result);
+                // 清理pending请求
+                self.pending_upload_file.write().remove(&request_id);
+                // 处理结果
+                match result {
+                    Ok(response) => response,
+                    Err(e) => bail!("接收响应失败: {}", e),
+                }
+            }
+            Err(_) => {
+                // 超时,清理pending请求
+                self.pending_upload_file.write().remove(&request_id);
+                bail!("请求超时")
+            }
+        }
+    }
+
+    /// 处理文件上传响应
+    pub fn handle_upload_file_result(&self, request_id: String, error: Option<String>, response: Option<FileUploadResponse>) {
+        debug!("开始处理文件上传响应, request_id: {}", request_id);
+        {
+            let pending = self.pending_upload_file.read();
+            debug!("当前pending上传请求数量: {}, 包含当前request_id: {}", pending.len(), pending.contains_key(&request_id));
+        }
+        
+        if let Some(sender) = self.pending_upload_file.write().remove(&request_id) {
+            let result = match (error, response) {
+                (Some(error), _) => Err(anyhow::anyhow!(error)),
+                (None, Some(response)) => Ok(response),
+                (None, None) => Err(anyhow::anyhow!("无效的响应: 既没有错误也没有结果")),
+            };
+            debug!("发送响应结果到等待的channel, request_id: {}, result: {:?}", request_id, result);
+            sender.send(result).ok();
+        } else {
+            warn!("未找到对应的pending上传请求, request_id: {}", request_id);
+        }
+    }
+
+    /// 处理文件上传数据块
+    pub async fn handle_upload_file_chunk(&self, request: FileUploadRequest) -> Result<()> {
+        debug!("处理文件上传数据块: path={}, size={}, is_last={}", 
+            request.path, request.chunk.len(), request.is_last);
+
+        // 发送请求到客户端
+        let sve_msg = ServerUpdate {
+            request_id: request.token.clone(),
+            server_message: Some(ServerMessage::UploadFile(request)),
+        };
+        
+        match self.update_tx.send(sve_msg.server_message.unwrap()).await {
+            Ok(_) => {
+                debug!("成功发送文件块到客户端");
+                Ok(())
+            }
+            Err(e) => {
+                error!("发送文件块失败: {:?}", e);
+                bail!("发送文件块失败: {}", e)
+            }
         }
     }
 }
