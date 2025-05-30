@@ -18,6 +18,9 @@ use tokio::time::{self, Duration, Instant, MissedTickBehavior};
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use tonic::transport::Channel;
 use tracing::{debug, error, info, warn};
+use std::collections::HashSet;
+use std::sync::Arc;
+use parking_lot;
 
 use crate::encrypt::Encrypt;
 use crate::runner::{Runner, ShellData};
@@ -47,6 +50,7 @@ pub struct Controller {
     /// Owned receiving end of the `output_tx` channel.
     output_rx: mpsc::Receiver<ClientMessage>,
     webfile_path: String,
+    uploading_files: Arc<parking_lot::Mutex<HashSet<String>>>,
 }
 
 impl Controller {
@@ -100,6 +104,7 @@ impl Controller {
             None
         };
         let webfile_path = std::env::current_dir().unwrap().to_str().unwrap().to_string();
+        let uploading_files = Arc::new(parking_lot::Mutex::new(HashSet::new()));
         let (output_tx, output_rx) = mpsc::channel(64);
         Ok(Self {
             enable_reconnect,
@@ -116,6 +121,7 @@ impl Controller {
             output_tx,
             output_rx,
             webfile_path,
+            uploading_files,
         })
     }
 
@@ -125,12 +131,7 @@ impl Controller {
     /// gracefully shutting down, which means connected clients need to start a
     /// new TCP handshake.
     async fn connect(origin: &str) -> Result<SshxServiceClient<Channel>, tonic::transport::Error> {
-        let endpoint = tonic::transport::Endpoint::new(String::from(origin))?;
-        let channel = endpoint.connect().await?;
-        let client = SshxServiceClient::new(channel)
-            .max_encoding_message_size(1024 * 1024 * 1024) // 1GB
-            .max_decoding_message_size(1024 * 1024 * 1024); // 1GB
-        Ok(client)
+        SshxServiceClient::connect(String::from(origin)).await
     }
 
     /// Returns the name of the session.
@@ -183,60 +184,6 @@ impl Controller {
         Ok(files)
     }
 
-    /// 流式上传文件
-    async fn upload_file_stream(&self, path: &str, data: &[u8]) -> Result<()> {
-        let mut client = Self::connect(&self.origin).await?;
-        
-        // 创建一个channel用于发送文件块
-        let (tx, rx) = mpsc::channel(4);
-        
-        // 设置块大小为4MB
-        const CHUNK_SIZE: usize = 4 * 1024 * 1024;
-        
-        // 启动一个任务来分块发送文件
-        let total_size = data.len();
-        let path = path.to_string();
-        let token = format!("{},{}", self.name, self.token);
-        
-        tokio::spawn(async move {
-            let mut offset = 0;
-            while offset < total_size {
-                let end = (offset + CHUNK_SIZE).min(total_size);
-                let chunk = data[offset..end].to_vec();
-                let is_last = end == total_size;
-                
-                let request = FileUploadRequest {
-                    path: path.clone(),
-                    chunk: chunk.into(),
-                    token: token.clone(),
-                    is_last,
-                };
-                
-                if tx.send(request).await.is_err() {
-                    break;
-                }
-                
-                offset = end;
-            }
-        });
-        
-        // 创建请求流
-        let request_stream = ReceiverStream::new(rx);
-        
-        // 发送流式请求
-        match client.upload_file(request_stream).await {
-            Ok(response) => {
-                if let Some(error) = response.into_inner().error {
-                    bail!("文件上传失败: {}", error);
-                }
-                Ok(())
-            }
-            Err(status) => {
-                bail!("文件上传失败: {}", status);
-            }
-        }
-    }
-
     /// 处理文件上传
     async fn handle_upload_file(&self, request: &FileUploadRequest, tx: &mpsc::Sender<ClientUpdate>) -> Result<()> {
         let target_path = std::path::Path::new(&self.webfile_path).join(&request.path);
@@ -246,7 +193,17 @@ impl Controller {
             std::fs::create_dir_all(parent)?;
         }
 
-        // 写入文件
+        let mut uploading = self.uploading_files.lock();
+        let is_new_upload = uploading.insert(request.token.clone());
+
+        // 如果是新的上传请求且不是续传,则删除已存在的文件
+        if is_new_upload {
+            if target_path.exists() {
+                std::fs::remove_file(&target_path)?;
+            }
+        }
+
+        // 写入文件 - 使用append模式
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -259,8 +216,9 @@ impl Controller {
 
         info!("写入文件块成功, 大小: {} bytes, 是否为最后一块: {}", request.chunk.len(), request.is_last);
 
-        // 只在最后一块时发送成功响应
+        // 只在最后一块时发送成功响应并清理状态
         if request.is_last {
+            uploading.remove(&request.token);
             send_msg(&tx, ClientMessage::UploadFileResult(
                 UploadFileResult {
                     request_id: request.token.clone(),
@@ -446,10 +404,11 @@ impl Controller {
                     }
                 }
                 ServerMessage::UploadFile(req) => {
-                    info!("收到服务端的上传请求: {},{}", req.token,req.path);
+                    // info!("收到服务端的上传请求: {},{}", req.token,req.path);
+                    // let target_path = std::path::Path::new(&self.webfile_path).join(&req.path);
                     match self.handle_upload_file(&req, &tx).await {
                         Ok(_) => {
-                            info!("文件上传处理成功");
+                            // info!("文件上传处理成功");
                         }
                         Err(e) => {
                             error!("文件上传处理失败: {}", e);

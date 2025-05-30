@@ -385,119 +385,65 @@ pub async fn upload_file(
     if session_name.is_empty() {
         return (StatusCode::BAD_REQUEST, "Session name cannot be empty").into_response();
     }
-
     let session = match state.lookup(session_name) {
         Some(session) => session,
         None => return (StatusCode::BAD_REQUEST, "Session not found").into_response(),
     };
-
     let token = format!("{}|{}", session_name, uuid::Uuid::new_v4().to_string());
-    
-    const CHUNK_SIZE: usize = 4 * 1024 * 1024; // 4MB chunks for streaming
-    let mut total_size: usize = 0;
-    let mut target_path = String::new();
-    let mut got_path = false;
 
-    while let Ok(Some(mut field)) = multipart.next_field().await {
-        info!("收到字段: name={:?}, filename={:?}, content_type={:?}", 
-            field.name(), 
-            field.file_name(), 
-            field.content_type()
-        );
-        
-        let name = field.name().unwrap_or_default().to_string();
-        
-        match name.as_str() {
+    // const _CHUNK_SIZE: usize = 8 * 1024 * 1024; // 8MB chunks
+    let mut target_path = String::new();
+
+    // 读取multipart表单字段
+    while let Some(field) = multipart.next_field().await.unwrap_or(None) {
+        let name = field.name().unwrap_or_default();
+        match name {
             "path" => {
-                match field.text().await {
-                    Ok(path) => {
-                        info!("设置目标路径: {}", path);
-                        if path.trim().is_empty() {
-                            error!("目标路径为空");
-                            return (StatusCode::BAD_REQUEST, "目标路径不能为空").into_response();
-                        }
-                        target_path = path;
-                        got_path = true;
-                    },
-                    Err(e) => {
-                        error!("读取目标路径失败: {}", e);
-                        return (StatusCode::BAD_REQUEST, format!("读取目标路径失败: {}", e)).into_response();
-                    }
-                }
+                target_path = field.text().await.unwrap_or_default();
             }
             "file" => {
-                if !got_path {
-                    error!("未收到目标路径");
-                    return (StatusCode::BAD_REQUEST, "必须先指定目标路径").into_response();
-                }
-
-                if let Some(filename) = field.file_name() {
-                    info!("处理文件: {}", filename);
-                }
-
-                let mut buffer = Vec::with_capacity(CHUNK_SIZE);
-                let mut chunk_count = 0;
-                let mut last_progress = 0;
+                let mut _is_first = true;
+                let mut _total_size = 0;
+                let mut field = field;
 
                 while let Ok(Some(chunk)) = field.chunk().await {
-                    chunk_count += 1;
-                    total_size += chunk.len();
-                    
-                    // 每50MB打印一次进度
-                    let current_progress = total_size / (50 * 1024 * 1024);
-                    if current_progress > last_progress {
-                        info!("上传进度: {}MB", total_size / 1024 / 1024);
-                        last_progress = current_progress;
-                    }
+                    let chunk_size = chunk.len();
+                    _total_size += chunk_size;
 
-                    buffer.extend_from_slice(&chunk);
-                    
-                    // 当buffer达到CHUNK_SIZE时发送
-                    if buffer.len() >= CHUNK_SIZE {
-                        info!("发送第 {} 个数据块，大小: {} bytes", chunk_count, buffer.len());
-                        
-                        let request = FileUploadRequest {
-                            path: target_path.clone(),
-                            chunk: buffer.clone().into(),
-                            token: token.clone(),
-                            is_last: false,
-                        };
-
-                        match session.handle_upload_file_chunk(request).await {
-                            Ok(_) => {
-                                buffer.clear();
-                                buffer.reserve(CHUNK_SIZE);
-                            }
-                            Err(e) => {
-                                error!("上传数据块失败: {}", e);
-                                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-                            }
-                        }
-                    }
-                }
-
-                info!("文件读取完成，共处理 {} 个数据块，总大小: {} bytes", chunk_count, total_size);
-
-                // 处理最后一块数据
-                if !buffer.is_empty() {
-                    info!("发送最后一块数据，大小: {} bytes", buffer.len());
-                    
+                    // 创建上传请求
                     let request = FileUploadRequest {
                         path: target_path.clone(),
-                        chunk: buffer.into(),
+                        chunk: Bytes::from(chunk),
                         token: token.clone(),
-                        is_last: true,
+                        is_last: false,
                     };
 
-                    match session.handle_upload_file_chunk(request).await {
-                        Ok(_) => {
-                            info!("文件上传完成，总大小: {} bytes", total_size);
-                            return (StatusCode::OK, format!("File uploaded successfully, total size: {} bytes", total_size)).into_response();
+                    // 发送到客户端并等待响应
+                    if let Err(e) = session.handle_upload_file_chunk(request).await {
+                        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+                    }
+
+                    _is_first = false;
+                }
+
+                // 发送最后一块,标记为结束
+                let final_request = FileUploadRequest {
+                    path: target_path.clone(),
+                    chunk: Bytes::new(),
+                    token: token.clone(),
+                    is_last: true,
+                };
+
+                match session.upload_file(final_request).await {
+                    Ok(response) => {
+                        if response.success {
+                            return (StatusCode::OK, "File uploaded successfully").into_response();
+                        } else {
+                            return (StatusCode::INTERNAL_SERVER_ERROR, response.message).into_response();
                         }
-                        Err(e) => {
-                            error!("上传最后一块失败: {}", e);
-                            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-                        }
+                    }
+                    Err(e) => {
+                        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
                     }
                 }
             }
@@ -505,11 +451,5 @@ pub async fn upload_file(
         }
     }
 
-    if total_size == 0 {
-        error!("未读取到文件数据");
-        return (StatusCode::BAD_REQUEST, "未读取到文件数据").into_response();
-    }
-
-    info!("文件上传完成，总大小: {} bytes", total_size);
-    (StatusCode::OK, format!("File uploaded successfully, total size: {} bytes", total_size)).into_response()
+    (StatusCode::BAD_REQUEST, "Missing file or path field").into_response()
 }
