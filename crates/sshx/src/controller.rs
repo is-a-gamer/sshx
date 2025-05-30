@@ -264,82 +264,83 @@ impl Controller {
         };
 
         // 使用tokio的异步读取
-        let mut buffer = vec![0; 2 * 1024 * 1024]; // 1MB 缓冲区
-        loop {
-            match file.read(&mut buffer).await {
-                Ok(n) if n > 0 => {
-                    // 发送数据块，使用 try_send 避免阻塞
-                    let response = FileDownloadResponse {
-                        chunk: buffer[..n].to_vec().into(),
-                        is_last: false,
-                    };
-                    
-                    let update = ClientUpdate {
-                        request_id: request.token.clone(),
-                        client_message: Some(ClientMessage::DownloadFileResult(DownloadFileResult {
-                            request_id: request.token.clone(),
-                            error: None,
-                            response: Some(response),
-                        })),
-                    };
+        let mut buffer = vec![0; 1024 * 1024]; // 1MB 缓冲区
+        
+        // 启动一个新的任务来处理文件读取和发送
+        let request_token = request.token.clone();
+        let tx = tx.clone();
+        
+        tokio::spawn(async move {
+            loop {
+                match file.read(&mut buffer).await {
+                    Ok(n) if n > 0 => {
+                        let response = FileDownloadResponse {
+                            chunk: buffer[..n].to_vec().into(),
+                            is_last: false,
+                        };
+                        
+                        let update = ClientUpdate {
+                            request_id: request_token.clone(),
+                            client_message: Some(ClientMessage::DownloadFileResult(DownloadFileResult {
+                                request_id: request_token.clone(),
+                                error: None,
+                                response: Some(response),
+                            })),
+                        };
 
-                    // 尝试发送，如果失败则使用阻塞发送
-                    if let Err(e) = tx.try_send(update) {
-                        match tx.send(e.into_inner()).await {
+                        // 使用try_send避免阻塞
+                        match tx.try_send(update) {
                             Ok(_) => (),
-                            Err(e) => {
-                                warn!("发送文件块失败: {}", e);
-                                return Ok(());
+                            Err(e) => match e {
+                                tokio::sync::mpsc::error::TrySendError::Full(update) => {
+                                    // 如果通道已满，等待一小段时间后重试
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                                    if let Err(_) = tx.try_send(update) {
+                                        break;
+                                    }
+                                }
+                                tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                                    // 通道已关闭，终止传输
+                                    break;
+                                }
                             }
                         }
                     }
-                }
-                Ok(_) => {
-                    // 发送最后一个空块表示结束
-                    let response = FileDownloadResponse {
-                        chunk: Vec::new().into(),
-                        is_last: true,
-                    };
-                    
-                    let update = ClientUpdate {
-                        request_id: request.token.clone(),
-                        client_message: Some(ClientMessage::DownloadFileResult(DownloadFileResult {
-                            request_id: request.token.clone(),
-                            error: None,
-                            response: Some(response),
-                        })),
-                    };
+                    Ok(_) => {
+                        // 发送最后一个空块表示结束
+                        let response = FileDownloadResponse {
+                            chunk: Vec::new().into(),
+                            is_last: true,
+                        };
+                        
+                        let update = ClientUpdate {
+                            request_id: request_token.clone(),
+                            client_message: Some(ClientMessage::DownloadFileResult(DownloadFileResult {
+                                request_id: request_token.clone(),
+                                error: None,
+                                response: Some(response),
+                            })),
+                        };
 
-                    // 尝试发送最后一块
-                    if let Err(e) = tx.try_send(update) {
-                        if let Err(e) = tx.send(e.into_inner()).await {
-                            warn!("发送最后文件块失败: {}", e);
-                        }
+                        tx.try_send(update).ok();
+                        break;
                     }
-                    break;
-                }
-                Err(e) => {
-                    let update = ClientUpdate {
-                        request_id: request.token.clone(),
-                        client_message: Some(ClientMessage::DownloadFileResult(DownloadFileResult {
-                            request_id: request.token.clone(),
-                            error: Some(format!("读取文件失败: {}", e)),
-                            response: None,
-                        })),
-                    };
+                    Err(e) => {
+                        let update = ClientUpdate {
+                            request_id: request_token.clone(),
+                            client_message: Some(ClientMessage::DownloadFileResult(DownloadFileResult {
+                                request_id: request_token.clone(),
+                                error: Some(format!("读取文件失败: {}", e)),
+                                response: None,
+                            })),
+                        };
 
-                    if let Err(e) = tx.try_send(update) {
-                        if let Err(e) = tx.send(e.into_inner()).await {
-                            warn!("发送错误消息失败: {}", e);
-                        }
+                        tx.try_send(update).ok();
+                        break;
                     }
-                    break;
                 }
             }
-
-            // 在每个块之间添加一个小的延迟，避免占用太多资源
-            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
-        }
+        });
 
         Ok(())
     }
