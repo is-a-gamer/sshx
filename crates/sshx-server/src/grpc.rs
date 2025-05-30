@@ -83,7 +83,54 @@ impl SshxService for GrpcServer {
     }
 
     async fn upload_file(&self, request: Request<Streaming<FileUploadRequest>>) -> RR<UploadFileResult> {
-        todo!()
+        let mut stream = request.into_inner();
+        
+        // 获取第一个消息以获取文件信息
+        let first_request = match stream.next().await {
+            Some(result) => result?,
+            None => return Err(Status::invalid_argument("missing first message")),
+        };
+
+        let session_name = match first_request.token.split('|').next() {
+            Some(name) => name,
+            None => return Err(Status::invalid_argument("invalid token format")),
+        };
+
+        let session = match self.0.lookup(session_name) {
+            Some(session) => session,
+            None => return Err(Status::not_found("session not found")),
+        };
+
+        // 处理第一个请求
+        if let Err(err) = session.handle_upload_file_chunk(first_request).await {
+            error!(?err, "failed to handle first upload chunk");
+            return Err(Status::internal(err.to_string()));
+        }
+
+        // 处理剩余的数据流
+        while let Some(request) = stream.next().await {
+            match request {
+                Ok(chunk_request) => {
+                    if let Err(err) = session.handle_upload_file_chunk(chunk_request).await {
+                        error!(?err, "failed to handle upload chunk");
+                        return Err(Status::internal(err.to_string()));
+                    }
+                }
+                Err(err) => {
+                    error!(?err, "failed to receive upload chunk");
+                    return Err(Status::internal(err.to_string()));
+                }
+            }
+        }
+
+        Ok(Response::new(UploadFileResult {
+            request_id: String::new(),
+            error: None,
+            response: Some(sshx_core::proto::FileUploadResponse {
+                success: true,
+                message: "File uploaded successfully".to_string(),
+            }),
+        }))
     }
 
     async fn download_file(&self, request: Request<FileDownloadRequest>) -> RR<Self::DownloadFileStream> {
@@ -256,7 +303,12 @@ async fn handle_update(tx: &ServerTx, session: &Session, update: ClientUpdate) -
             );
         }
         Some(ClientMessage::UploadFileResult(result)) => {
-            info!("收到客户端返回的上传文件结果: request_id: {}, result: {:?}", result.request_id, result);
+            info!("收到客户端返回的文件上传结果: request_id: {}", result.request_id);
+            session.handle_upload_file_result(
+                result.request_id,
+                result.error,
+                result.response
+            );
         }
         None => (), // Heartbeat message, ignored.
     }

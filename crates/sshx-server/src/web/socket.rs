@@ -6,12 +6,16 @@ use axum::extract::{
     ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
     Path, State,
 };
+use axum::extract::multipart::Multipart;
 use axum::response::IntoResponse;
 use axum::Json;
 use bytes::Bytes;
 use futures_util::SinkExt;
 use http::HeaderMap;
-use sshx_core::proto::{server_update::ServerMessage, ListDirectoryRequest, NewShell, TerminalInput, TerminalSize};
+use sshx_core::proto::{
+    server_update::ServerMessage, ListDirectoryRequest, NewShell, TerminalInput, TerminalSize,
+    FileUploadRequest, FileUploadResponse,
+};
 use sshx_core::Sid;
 use subtle::ConstantTimeEq;
 use tokio::sync::mpsc;
@@ -366,4 +370,146 @@ pub async fn list_directory(
         Ok(response) => Json(response).into_response(),
         Err((status, message)) => (status, message).into_response(),
     }
+}
+
+pub async fn upload_file(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> impl IntoResponse {
+    let session_name = match headers.get("Session") {
+        Some(name) => name.to_str().unwrap_or_default(),
+        None => return (StatusCode::BAD_REQUEST, "Session name is required").into_response(),
+    };
+
+    if session_name.is_empty() {
+        return (StatusCode::BAD_REQUEST, "Session name cannot be empty").into_response();
+    }
+
+    let session = match state.lookup(session_name) {
+        Some(session) => session,
+        None => return (StatusCode::BAD_REQUEST, "Session not found").into_response(),
+    };
+
+    let token = format!("{}|{}", session_name, uuid::Uuid::new_v4().to_string());
+    
+    const CHUNK_SIZE: usize = 4 * 1024 * 1024; // 4MB chunks for streaming
+    let mut total_size: usize = 0;
+    let mut target_path = String::new();
+    let mut got_path = false;
+
+    while let Ok(Some(mut field)) = multipart.next_field().await {
+        info!("收到字段: name={:?}, filename={:?}, content_type={:?}", 
+            field.name(), 
+            field.file_name(), 
+            field.content_type()
+        );
+        
+        let name = field.name().unwrap_or_default().to_string();
+        
+        match name.as_str() {
+            "path" => {
+                match field.text().await {
+                    Ok(path) => {
+                        info!("设置目标路径: {}", path);
+                        if path.trim().is_empty() {
+                            error!("目标路径为空");
+                            return (StatusCode::BAD_REQUEST, "目标路径不能为空").into_response();
+                        }
+                        target_path = path;
+                        got_path = true;
+                    },
+                    Err(e) => {
+                        error!("读取目标路径失败: {}", e);
+                        return (StatusCode::BAD_REQUEST, format!("读取目标路径失败: {}", e)).into_response();
+                    }
+                }
+            }
+            "file" => {
+                if !got_path {
+                    error!("未收到目标路径");
+                    return (StatusCode::BAD_REQUEST, "必须先指定目标路径").into_response();
+                }
+
+                if let Some(filename) = field.file_name() {
+                    info!("处理文件: {}", filename);
+                }
+
+                let mut buffer = Vec::with_capacity(CHUNK_SIZE);
+                let mut chunk_count = 0;
+                let mut last_progress = 0;
+
+                while let Ok(Some(chunk)) = field.chunk().await {
+                    chunk_count += 1;
+                    total_size += chunk.len();
+                    
+                    // 每50MB打印一次进度
+                    let current_progress = total_size / (50 * 1024 * 1024);
+                    if current_progress > last_progress {
+                        info!("上传进度: {}MB", total_size / 1024 / 1024);
+                        last_progress = current_progress;
+                    }
+
+                    buffer.extend_from_slice(&chunk);
+                    
+                    // 当buffer达到CHUNK_SIZE时发送
+                    if buffer.len() >= CHUNK_SIZE {
+                        info!("发送第 {} 个数据块，大小: {} bytes", chunk_count, buffer.len());
+                        
+                        let request = FileUploadRequest {
+                            path: target_path.clone(),
+                            chunk: buffer.clone().into(),
+                            token: token.clone(),
+                            is_last: false,
+                        };
+
+                        match session.handle_upload_file_chunk(request).await {
+                            Ok(_) => {
+                                buffer.clear();
+                                buffer.reserve(CHUNK_SIZE);
+                            }
+                            Err(e) => {
+                                error!("上传数据块失败: {}", e);
+                                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+                            }
+                        }
+                    }
+                }
+
+                info!("文件读取完成，共处理 {} 个数据块，总大小: {} bytes", chunk_count, total_size);
+
+                // 处理最后一块数据
+                if !buffer.is_empty() {
+                    info!("发送最后一块数据，大小: {} bytes", buffer.len());
+                    
+                    let request = FileUploadRequest {
+                        path: target_path.clone(),
+                        chunk: buffer.into(),
+                        token: token.clone(),
+                        is_last: true,
+                    };
+
+                    match session.handle_upload_file_chunk(request).await {
+                        Ok(_) => {
+                            info!("文件上传完成，总大小: {} bytes", total_size);
+                            return (StatusCode::OK, format!("File uploaded successfully, total size: {} bytes", total_size)).into_response();
+                        }
+                        Err(e) => {
+                            error!("上传最后一块失败: {}", e);
+                            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+                        }
+                    }
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    if total_size == 0 {
+        error!("未读取到文件数据");
+        return (StatusCode::BAD_REQUEST, "未读取到文件数据").into_response();
+    }
+
+    info!("文件上传完成，总大小: {} bytes", total_size);
+    (StatusCode::OK, format!("File uploaded successfully, total size: {} bytes", total_size)).into_response()
 }
