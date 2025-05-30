@@ -13,6 +13,13 @@ service SshxService {
 
   // Gracefully shut down an existing SSH session.
   rpc Close(CloseRequest) returns (CloseResponse);
+
+  // 文件管理相关的RPC
+  rpc ListDirectory(ListDirectoryRequest) returns (ListDirectoryResponse);
+  rpc UploadFile(stream FileUploadRequest) returns (UploadFileResult);
+  rpc DownloadFile(FileDownloadRequest) returns (stream FileDownloadResponse);
+  rpc DeleteFile(DeleteFileRequest) returns (DeleteFileResponse);
+  rpc CreateDirectory(CreateDirectoryRequest) returns (CreateDirectoryResponse);
 }
 
 // Details of bytes exchanged with the terminal.
@@ -65,28 +72,40 @@ message NewShell {
 
 // Bidirectional streaming update from the client.
 message ClientUpdate {
+  string request_id = 1;  // 请求ID，用于关联请求和响应
   oneof client_message {
-    string hello = 1;           // First stream message: "name,token".
-    TerminalData data = 2;      // Stream data from the terminal.
-    NewShell created_shell = 3; // Acknowledge that a new shell was created.
-    uint32 closed_shell = 4;    // Acknowledge that a shell was closed.
+    string hello = 2;           // First stream message: "name,token".
+    TerminalData data = 3;      // Stream data from the terminal.
+    NewShell created_shell = 4; // Acknowledge that a new shell was created.
+    uint32 closed_shell = 5;    // Acknowledge that a shell was closed.
     fixed64 pong = 14;          // Response for latency measurement.
     string error = 15;
     string kick = 16;
+
+    ListDirectoryResult list_directory_result = 17;
+    UploadFileResult upload_file_result = 18;
   }
 }
 
 // Bidirectional streaming update from the server.
 message ServerUpdate {
+  string request_id = 1;  // 请求ID，用于关联请求和响应
   oneof server_message {
-    TerminalInput input = 1;   // Remote input bytes, received from the user.
-    NewShell create_shell = 2; // ID of a new shell.
-    uint32 close_shell = 3;    // ID of a shell to close.
-    SequenceNumbers sync = 4;  // Periodic sequence number sync.
-    TerminalSize resize = 5;   // Resize a terminal window.
+    TerminalInput input = 2;   // Remote input bytes, received from the user.
+    NewShell create_shell = 3; // ID of a new shell.
+    uint32 close_shell = 4;    // ID of a shell to close.
+    SequenceNumbers sync = 5;  // Periodic sequence number sync.
+    TerminalSize resize = 6;   // Resize a terminal window.
     fixed64 ping = 14;         // Request a pong, with the timestamp.
     string error = 15;
     string kick = 16;
+
+    // 文件管理相关的请求
+    ListDirectoryRequest list_directory = 17;
+    FileUploadRequest upload_file = 18;
+    FileDownloadRequest download_file = 19;
+    DeleteFileRequest delete_file = 20;
+    CreateDirectoryRequest create_directory = 21;
   }
 }
 
@@ -119,4 +138,93 @@ message SerializedShell {
   int32 winsize_y = 7;
   uint32 winsize_rows = 8;
   uint32 winsize_cols = 9;
+}
+// 文件管理相关的消息定义
+message FileInfo {
+  string name = 1;           // 文件名
+  bool is_directory = 2;     // 是否是目录
+  uint64 size = 3;           // 文件大小(字节)
+  uint64 modified_time = 4;  // 最后修改时间
+  string permissions = 5;    // 文件权限
+}
+
+message ListDirectoryRequest {
+  string path = 1;          // 要列出内容的目录路径
+  string token = 2;         // 会话验证token
+}
+message ListDirectoryResponse {
+  repeated FileInfo files = 1;  // 目录中的文件和子目录列表
+}
+
+message FileUploadRequest {
+  string path = 1;          // 目标文件路径
+  bytes chunk = 2;          // 文件数据块
+  string token = 3;         // 会话验证token
+  bool is_last = 4;         // 是否是最后一块数据
+}
+
+message FileUploadResponse {
+  bool success = 1;         // 上传是否成功
+  string message = 2;       // 错误信息(如果有)
+}
+
+message FileDownloadRequest {
+  string path = 1;          // 要下载的文件路径
+  string token = 2;         // 会话验证token
+}
+
+message FileDownloadResponse {
+  bytes chunk = 1;          // 文件数据块
+  bool is_last = 2;         // 是否是最后一块数据
+}
+
+message DeleteFileRequest {
+  string path = 1;          // 要删除的文件/目录路径
+  string token = 2;         // 会话验证token
+}
+
+message DeleteFileResponse {
+  bool success = 1;         // 删除是否成功
+  string message = 2;       // 错误信息(如果有)
+}
+
+message CreateDirectoryRequest {
+  string path = 1;          // 要创建的目录路径
+  string token = 2;         // 会话验证token
+}
+
+message CreateDirectoryResponse {
+  bool success = 1;         // 创建是否成功
+  string message = 2;       // 错误信息(如果有)
+}
+
+// 文件管理相关的消息定义
+message ListDirectoryResult {
+  string request_id = 1;         // 请求ID
+  ListDirectoryResponse response = 2;  // 目录列表响应
+  optional string error = 3;     // 错误信息
+}
+
+message UploadFileResult {
+  string request_id = 1;         // 请求ID
+  FileUploadResponse response = 2;  // 文件上传响应
+  optional string error = 3;     // 错误信息
+}
+
+message DownloadFileResult {
+  string request_id = 1;         // 请求ID
+  FileDownloadResponse response = 2;  // 文件下载响应
+  optional string error = 3;     // 错误信息
+}
+
+message DeleteFileResult {
+  string request_id = 1;         // 请求ID
+  DeleteFileResponse response = 2;  // 文件删除响应
+  optional string error = 3;     // 错误信息
+}
+
+message CreateDirectoryResult {
+  string request_id = 1;         // 请求ID
+  CreateDirectoryResponse response = 2;  // 目录创建响应
+  optional string error = 3;     // 错误信息
 }

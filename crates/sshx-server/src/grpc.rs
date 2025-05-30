@@ -7,7 +7,9 @@ use base64::prelude::{Engine as _, BASE64_STANDARD};
 use hmac::Mac;
 use sshx_core::proto::{
     client_update::ClientMessage, server_update::ServerMessage, sshx_service_server::SshxService,
-    ClientUpdate, CloseRequest, CloseResponse, OpenRequest, OpenResponse, ServerUpdate,
+    ClientUpdate, CloseRequest, CloseResponse, OpenRequest, OpenResponse, ServerUpdate, FileDownloadResponse, 
+    ListDirectoryRequest, ListDirectoryResponse, FileUploadRequest, UploadFileResult, FileDownloadRequest, 
+    DeleteFileRequest, DeleteFileResponse, CreateDirectoryRequest, CreateDirectoryResponse,
 };
 use sshx_core::{rand_alphanumeric, Sid};
 use tokio::sync::mpsc;
@@ -41,6 +43,7 @@ type RR<T> = Result<Response<T>, Status>;
 #[tonic::async_trait]
 impl SshxService for GrpcServer {
     type ChannelStream = ReceiverStream<Result<ServerUpdate, Status>>;
+    type DownloadFileStream = ReceiverStream<Result<FileDownloadResponse, Status>>;
 
     async fn open(&self, request: Request<OpenRequest>) -> RR<OpenResponse> {
         let request = request.into_inner();
@@ -73,6 +76,26 @@ impl SshxService for GrpcServer {
             token: BASE64_STANDARD.encode(token.into_bytes()),
             url,
         }))
+    }
+
+    async fn list_directory(&self, request: Request<ListDirectoryRequest>) -> RR<ListDirectoryResponse> {
+        todo!()
+    }
+
+    async fn upload_file(&self, request: Request<Streaming<FileUploadRequest>>) -> RR<UploadFileResult> {
+        todo!()
+    }
+
+    async fn download_file(&self, request: Request<FileDownloadRequest>) -> RR<Self::DownloadFileStream> {
+        todo!()
+    }
+
+    async fn delete_file(&self, request: Request<DeleteFileRequest>) -> RR<DeleteFileResponse> {
+        todo!()
+    }
+
+    async fn create_directory(&self, request: Request<CreateDirectoryRequest>) -> RR<CreateDirectoryResponse> {
+        todo!()
     }
 
     async fn channel(&self, request: Request<Streaming<ClientUpdate>>) -> RR<Self::ChannelStream> {
@@ -224,6 +247,17 @@ async fn handle_update(tx: &ServerTx, session: &Session, update: ClientUpdate) -
         Some(ClientMessage::Kick(kick)) => {
             info!("kicked session id is {}",kick);
         }
+        Some(ClientMessage::ListDirectoryResult(result)) => {
+            info!("收到客户端返回的目录列表结果: request_id: {}, result: {:?}", result.request_id, result);
+            session.handle_list_directory_result(
+                result.request_id,
+                result.error,
+                result.response
+            );
+        }
+        Some(ClientMessage::UploadFileResult(result)) => {
+            info!("收到客户端返回的上传文件结果: request_id: {}, result: {:?}", result.request_id, result);
+        }
         None => (), // Heartbeat message, ignored.
     }
     true
@@ -232,6 +266,7 @@ async fn handle_update(tx: &ServerTx, session: &Session, update: ClientUpdate) -
 /// Attempt to send a server message to the client.
 async fn send_msg(tx: &ServerTx, message: ServerMessage) -> bool {
     let update = Ok(ServerUpdate {
+        request_id: "".to_string(),
         server_message: Some(message),
     });
     tx.send(update).await.is_ok()

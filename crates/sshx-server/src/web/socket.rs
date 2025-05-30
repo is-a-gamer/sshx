@@ -11,12 +11,13 @@ use axum::Json;
 use bytes::Bytes;
 use futures_util::SinkExt;
 use http::HeaderMap;
-use sshx_core::proto::{server_update::ServerMessage, NewShell, TerminalInput, TerminalSize};
+use sshx_core::proto::{server_update::ServerMessage, ListDirectoryRequest, NewShell, TerminalInput, TerminalSize};
 use sshx_core::Sid;
 use subtle::ConstantTimeEq;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tracing::{error, info, info_span, warn, Instrument};
+use axum::http::StatusCode;
 
 use crate::session::Session;
 use crate::web::protocol::{WsClient, WsServer};
@@ -330,4 +331,39 @@ pub async fn get_session_list(
     }
     let session_names = state.get_all_session_names();
     Json(session_names)
+}
+// 跳转到session 中的 list_directory 方法
+pub async fn list_directory(
+    Path(path): Path<String>,
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    // TODO modify token
+    let session_name = headers.get("Session");
+    if session_name.is_none() {
+        return (StatusCode::BAD_REQUEST, "Session name is required").into_response();
+    }
+    if session_name.unwrap().is_empty() {
+        return Json(Vec::<String>::new()).into_response();
+    }
+    // 最后的是 会话名称|随机UUID
+    let token = session_name.unwrap().to_str().unwrap().to_string() + &"|" + & uuid::Uuid::new_v4().to_string();
+    info!("token: {}", token);
+    let result = if let Some(session) = state.lookup(&session_name.unwrap().to_str().unwrap()) {
+        let request = ListDirectoryRequest {
+            path,
+            token: token.clone(),
+        };
+        match session.list_directory(request).await {
+            Ok(response) => Ok(response),
+            Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+        }
+    } else {
+        Err((StatusCode::BAD_REQUEST, "Session not found".to_string()))
+    };
+    
+    match result {
+        Ok(response) => Json(response).into_response(),
+        Err((status, message)) => (status, message).into_response(),
+    }
 }

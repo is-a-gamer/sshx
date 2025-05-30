@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use axum::response::IntoResponse;
 use axum::routing::{any, get_service};
 use axum::Router;
 use tower_http::services::{ServeDir, ServeFile};
@@ -35,5 +34,7 @@ fn backend() -> Router<Arc<ServerState>> {
     Router::new()
         .route("/s/{name}", any(socket::get_session_ws))
         .route("/session/list", any(socket::get_session_list))
+        .route("/files/list/{*path}", any(socket::list_directory))
+        // .route("/files/list", any(socket::list_directory))
     // Json(state.get_all_session_names())
 }

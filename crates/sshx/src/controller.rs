@@ -4,10 +4,11 @@ use std::collections::HashMap;
 use std::pin::pin;
 use std::process::exit;
 use anyhow::{Context, Result};
-use tokio::io::AsyncWriteExt;
+use sshx_core::proto::FileInfo;
 use sshx_core::proto::{
     client_update::ClientMessage, server_update::ServerMessage,
     sshx_service_client::SshxServiceClient, ClientUpdate, CloseRequest, NewShell, OpenRequest,
+    ListDirectoryResult, ListDirectoryResponse,
 };
 use sshx_core::Sid;
 use tokio::sync::mpsc;
@@ -33,7 +34,6 @@ pub struct Controller {
     runner: Runner,
     encrypt: Encrypt,
     encryption_key: String,
-
     name: String,
     password: String,
     token: String,
@@ -45,6 +45,7 @@ pub struct Controller {
     output_tx: mpsc::Sender<ClientMessage>,
     /// Owned receiving end of the `output_tx` channel.
     output_rx: mpsc::Receiver<ClientMessage>,
+    webfile_path: String,
 }
 
 impl Controller {
@@ -97,7 +98,7 @@ impl Controller {
         } else {
             None
         };
-
+        let webfile_path = std::env::current_dir().unwrap().to_str().unwrap().to_string();
         let (output_tx, output_rx) = mpsc::channel(64);
         Ok(Self {
             enable_reconnect,
@@ -113,6 +114,7 @@ impl Controller {
             shells_tx: HashMap::new(),
             output_tx,
             output_rx,
+            webfile_path,
         })
     }
 
@@ -143,6 +145,36 @@ impl Controller {
     /// Returns the encryption key for this session, hidden from the server.
     pub fn encryption_key(&self) -> &str {
         &self.encryption_key
+    }
+
+    async fn list_directory(&self, path: &str, tx: &mpsc::Sender<ClientUpdate>) -> Result<Vec<FileInfo>> {
+        let path = std::path::Path::new(&self.webfile_path).join(path);
+        let entries = std::fs::read_dir(path)?;
+        let mut files = Vec::new();
+        
+        for entry in entries {
+            if let Ok(entry) = entry {
+                if let Ok(metadata) = entry.metadata() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    let is_directory = metadata.is_dir();
+                    let size = metadata.len();
+                    let modified_time = metadata.modified()
+                        .map(|t| t.duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default().as_secs())
+                        .unwrap_or(0);
+                    
+                    files.push(FileInfo {
+                        name,
+                        is_directory,
+                        size,
+                        modified_time,
+                        permissions: "".to_string(),
+                    });
+                }
+            }
+        }
+        
+        Ok(files)
     }
 
     /// Run the controller forever, listening for requests from the server.
@@ -289,6 +321,43 @@ impl Controller {
                     client.close(req).await?;
                     exit(0)
                 }
+                ServerMessage::ListDirectory(req) => {
+                    info!("收到服务端的目录列表请求: {:?}", req);
+                    match self.list_directory(&req.path, &tx).await {
+                        Ok(files) => {
+                            send_msg(&tx, ClientMessage::ListDirectoryResult(
+                                ListDirectoryResult {
+                                    request_id: req.token.clone(),
+                                    error: None,
+                                    response: Some(ListDirectoryResponse {
+                                        files,
+                                    }),
+                                }
+                            )).await?;
+                        },
+                        Err(e) => {
+                            send_msg(&tx, ClientMessage::ListDirectoryResult(
+                                ListDirectoryResult {
+                                    request_id: req.token.clone(),
+                                    error: Some(format!("无法读取目录: {}", e)),
+                                    response: None,
+                                }
+                            )).await?;
+                        }
+                    }
+                }
+                ServerMessage::UploadFile(req) => {
+                    info!("收到服务端的上传请求: {:?}", req);
+                }
+                ServerMessage::DownloadFile(req) => {
+                    info!("收到服务端的下载请求: {:?}", req);
+                }
+                ServerMessage::DeleteFile(req) => {
+                    info!("收到服务端的删除请求: {:?}", req);
+                }
+                ServerMessage::CreateDirectory(req) => {
+                    info!("收到服务端的创建目录请求: {:?}", req);
+                }
             }
         }
     }
@@ -337,6 +406,7 @@ impl Controller {
 /// Attempt to send a client message over an update channel.
 async fn send_msg(tx: &mpsc::Sender<ClientUpdate>, message: ClientMessage) -> Result<()> {
     let update = ClientUpdate {
+        request_id: "".to_string(),
         client_message: Some(message),
     };
     tx.send(update)
