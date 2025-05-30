@@ -1,6 +1,6 @@
 <script lang="ts">
   import { createEventDispatcher } from "svelte";
-  import { FolderIcon, FileIcon, UploadIcon, DownloadIcon } from "svelte-feather-icons";
+  import { FolderIcon, FileIcon, UploadIcon, DownloadIcon, CheckIcon } from "svelte-feather-icons";
   import OverlayMenu from "./OverlayMenu.svelte";
 
   export let open: boolean;
@@ -19,8 +19,59 @@
   let uploadInput: HTMLInputElement;
   let uploadProgress: Record<string, number> = {};
   let uploading: Record<string, boolean> = {};
-  let downloadProgress: Record<string, number> = {};
   let downloading: Record<string, boolean> = {};
+  
+  // 右键菜单相关状态
+  let contextMenuVisible = false;
+  let contextMenuX = 0;
+  let contextMenuY = 0;
+  let selectedFile = "";
+  let showCopiedMessage = false;
+
+  // 关闭右键菜单
+  function closeContextMenu() {
+    contextMenuVisible = false;
+  }
+
+  // 处理右键点击
+  function handleContextMenu(event: MouseEvent, filename: string) {
+    event.preventDefault();
+    contextMenuX = event.clientX;
+    contextMenuY = event.clientY;
+    selectedFile = filename;
+    contextMenuVisible = true;
+  }
+
+  // 复制curl命令
+  async function copyCurlCommand() {
+    const downloadPath = `${currentPath}/${selectedFile}`.replace(/\/\//g, '/');
+    const encodedPath = downloadPath.split('/').map(part => encodeURIComponent(part)).join('/');
+    const curlCommand = `curl -X GET "http://localhost:8051/api/files/download/${encodedPath}" -H "Session: ${sessionName}" --output "${selectedFile}"`;
+    
+    try {
+      await navigator.clipboard.writeText(curlCommand);
+      showCopiedMessage = true;
+      setTimeout(() => {
+        showCopiedMessage = false;
+      }, 2000);
+    } catch (error) {
+      console.error('Failed to copy curl command:', error);
+    }
+    closeContextMenu();
+  }
+
+  // 浏览器直接下载
+  function browserDownload() {
+    handleDownload(selectedFile);
+    closeContextMenu();
+  }
+
+  // 点击其他地方关闭右键菜单
+  function handleGlobalClick() {
+    if (contextMenuVisible) {
+      closeContextMenu();
+    }
+  }
 
   async function loadDirectory(path: string) {
     if (path === "" || path === undefined) {
@@ -106,76 +157,53 @@
 
   async function handleDownload(filename: string) {
     const path = currentPath + "/" + filename;
-    const url = `/api/files/download/${path}`;
+    const downloadUrl = `/api/files/download/${path}`;
     
     // 设置下载状态
     downloading[filename] = true;
-    downloadProgress[filename] = 0;
     downloading = {...downloading};
-    downloadProgress = {...downloadProgress};
-    
-    const xhr = new XMLHttpRequest();
-    xhr.open('GET', url);
-    xhr.responseType = 'blob';
-    xhr.setRequestHeader('Session', sessionName);
 
-    // 监听所有相关的进度事件
-    xhr.addEventListener("loadstart", () => {
-      downloadProgress[filename] = 0;
-      downloadProgress = {...downloadProgress};
-    });
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('GET', downloadUrl);
+      xhr.responseType = 'blob';
+      xhr.setRequestHeader('Session', sessionName);
 
-    xhr.addEventListener("progress", (event) => {
-      if (event.lengthComputable) {
-        const percent = Math.round((event.loaded / event.total) * 100);
-        downloadProgress[filename] = percent;
-        downloadProgress = {...downloadProgress};
-      }
-    });
-
-    xhr.addEventListener("load", () => {
-      downloadProgress[filename] = 100;
-      downloadProgress = {...downloadProgress};
-    });
-    
-    // 使用 Promise 包装异步操作
-    try {
-      await new Promise((resolve, reject) => {
-        xhr.onload = () => {
-          if (xhr.status === 200) {
-            const blob = xhr.response;
-            const url = window.URL.createObjectURL(blob);
-            const link = document.createElement('a');
-            link.href = url;
-            link.download = filename;
-            
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-            window.URL.revokeObjectURL(url);
-            resolve(undefined);
-          } else {
-            reject(new Error('Download failed'));
-          }
-        };
-        
-        xhr.onerror = () => {
+      // 下载完成
+      xhr.addEventListener('load', () => {
+        if (xhr.status === 200) {
+          const blob = xhr.response;
+          const blobUrl = window.URL.createObjectURL(blob);
+          const link = document.createElement('a');
+          link.href = blobUrl;
+          link.download = filename;
+          
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          window.URL.revokeObjectURL(blobUrl);
+          resolve(undefined);
+        } else {
           reject(new Error('Download failed'));
-        };
-
-        xhr.send();
+        }
       });
-    } catch (error) {
+
+      // 下载出错
+      xhr.addEventListener('error', () => {
+        reject(new Error('Download failed'));
+      });
+
+      // 开始下载
+      xhr.send();
+    }).catch(error => {
       console.error('Download failed:', error);
-    } finally {
+    }).finally(() => {
       // 延迟一秒后清理下载状态
       setTimeout(() => {
         delete downloading[filename];
-        delete downloadProgress[filename];
         downloading = {...downloading};
-        downloadProgress = {...downloadProgress};
       }, 1000);
-    }
+    });
   }
 
   // 当组件打开时加载根目录
@@ -195,9 +223,11 @@
   }
 </script>
 
+<svelte:window on:click={handleGlobalClick} />
+
 <OverlayMenu
-  title="File Manager"
-  description="Manage your files and directories"
+  title="文件临时传递工具"
+  description="大文件(500M)右键复制curl命令,否则无法保证正常传输,这是浏览器的限制"
   showCloseButton
   {open}
   on:close
@@ -243,12 +273,6 @@
           {/each}
           {#each Object.entries(downloading) as [filename, _]}
             <div class="text-sm text-zinc-400 mb-1">{filename} (下载中)</div>
-            <div class="h-1 bg-zinc-700 rounded-full overflow-hidden mb-2">
-              <div 
-                class="h-full bg-green-500 transition-all duration-200"
-                style="width: {downloadProgress[filename]}%"
-              />
-            </div>
           {/each}
         </div>
       {/if}
@@ -276,7 +300,10 @@
       {:else}
         <div class="divide-y divide-zinc-700">
           {#each files as file}
-            <div class="p-4 flex items-center justify-between hover:bg-zinc-700/50">
+            <div 
+              class="p-4 flex items-center justify-between hover:bg-zinc-700/50"
+              on:contextmenu={(e) => !file.is_directory && handleContextMenu(e, file.name)}
+            >
               <div class="flex items-center gap-3">
                 {#if file.is_directory}
                   <FolderIcon class="text-indigo-400" size="20" />
@@ -312,6 +339,35 @@
         </div>
       {/if}
     </div>
+
+    <!-- 右键菜单 -->
+    {#if contextMenuVisible}
+      <div 
+        class="fixed bg-zinc-800 rounded-lg shadow-lg py-2 z-50"
+        style="left: {contextMenuX}px; top: {contextMenuY}px;"
+      >
+        <button 
+          class="w-full px-4 py-2 text-left hover:bg-zinc-700 text-sm"
+          on:click={copyCurlCommand}
+        >
+          Curl下载命令
+        </button>
+        <button 
+          class="w-full px-4 py-2 text-left hover:bg-zinc-700 text-sm"
+          on:click={browserDownload}
+        >
+          浏览器直接下载
+        </button>
+      </div>
+    {/if}
+
+    <!-- 复制成功提示 -->
+    {#if showCopiedMessage}
+      <div class="fixed bottom-4 right-4 bg-green-500 text-white px-4 py-2 rounded-lg flex items-center gap-2">
+        <CheckIcon size="16" />
+        curl命令已复制
+      </div>
+    {/if}
   </div>
 </OverlayMenu>
 

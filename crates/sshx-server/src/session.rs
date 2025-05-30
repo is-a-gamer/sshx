@@ -614,7 +614,7 @@ impl Session {
         debug!("使用的request_id: {}", request_id);
         
         // 创建一个mpsc channel来传输文件块，增加缓冲区大小到128
-        let (tx, rx) = mpsc::channel(128);
+        let (tx, rx) = mpsc::channel(256);
         
         // 存储发送端
         {
@@ -659,7 +659,6 @@ impl Session {
                     if response.is_last {
                         debug!("这是最后一块,清理pending状态");
                         pending.remove(&request_id);
-                        
                         // 通知客户端下载完成，使用 try_send 避免阻塞
                         if let Err(e) = self.update_tx.try_send(ServerMessage::DownloadFile(FileDownloadRequest {
                             path: String::new(),
@@ -670,9 +669,18 @@ impl Session {
                     }
                 }
                 Err(e) => {
-                    warn!("无法发送文件块到接收端: {}", e);
-                    // 如果发送失败,移除pending状态
-                    pending.remove(&request_id);
+                    match e {
+                        tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                            // 通道已满，说明接收端处理较慢，记录警告但不移除状态
+                            warn!("发送通道已满，等待接收端处理: {}", e);
+                            // 不移除 pending 状态，让系统自动重试
+                        }
+                        tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                            // 通道已关闭，说明接收端已经断开，这时才移除状态
+                            warn!("通道已关闭，清理状态: {}", e);
+                            pending.remove(&request_id);
+                        }
+                    }
                 }
             }
         } else {

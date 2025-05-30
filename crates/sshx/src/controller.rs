@@ -264,7 +264,7 @@ impl Controller {
         };
 
         // 使用tokio的异步读取
-        let mut buffer = vec![0; 8 * 1024 * 1024]; // 1MB 缓冲区
+        let mut buffer = vec![0; 2 * 1024 * 1024]; // 1MB 缓冲区
         loop {
             match file.read(&mut buffer).await {
                 Ok(n) if n > 0 => {
@@ -338,7 +338,7 @@ impl Controller {
             }
 
             // 在每个块之间添加一个小的延迟，避免占用太多资源
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
         }
 
         Ok(())
@@ -396,7 +396,7 @@ impl Controller {
 
     /// Helper function used by `run()` that can return errors.
     async fn try_channel(&mut self) -> Result<()> {
-        let (tx, rx) = mpsc::channel(16);
+        let (tx, rx) = mpsc::channel(256);
 
         let hello = ClientMessage::Hello(format!("{},{}", self.name, self.token));
         send_msg(&tx, hello).await?;
@@ -569,7 +569,7 @@ impl Controller {
 
     /// Entry point to start a new terminal task on the client.
     fn spawn_shell_task(&mut self, id: Sid, center: (i32, i32)) {
-        let (shell_tx, shell_rx) = mpsc::channel(16);
+        let (shell_tx, shell_rx) = mpsc::channel(256);
         let opt = self.shells_tx.insert(id, shell_tx);
         debug_assert!(opt.is_none(), "shell ID cannot be in existing tasks");
 

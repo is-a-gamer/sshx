@@ -19,7 +19,7 @@ async fn main() -> Result<()> {
     let mut terminal = Terminal::new(&shell).await?;
 
     // Separate thread for reading from standard input.
-    let (tx, mut rx) = mpsc::channel::<Arc<[u8]>>(16);
+    let (tx, mut rx) = mpsc::channel::<Arc<[u8]>>(256);
     thread::spawn(move || loop {
         let mut buf = [0u8; 256];
         let n = std::io::stdin().read(&mut buf).unwrap();
