@@ -1945,6 +1945,7 @@ dependencies = [
  "ctr",
  "encoding_rs",
  "nix",
+ "parking_lot",
  "pin-project",
  "sshx-core",
  "tokio",

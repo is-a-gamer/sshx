@@ -91,7 +91,7 @@ message ClientUpdate {
 message ServerUpdate {
   string request_id = 1;  // 请求ID，用于关联请求和响应
   oneof server_message {
-    TerminalInput input = 2;   // Remote input bytes, received from the user.
+    TerminalInput input = 7;   // Remote input bytes, received from the user.
     NewShell create_shell = 3; // ID of a new shell.
     uint32 close_shell = 4;    // ID of a shell to close.
     SequenceNumbers sync = 5;  // Periodic sequence number sync.
